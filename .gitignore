@@ -1,0 +1,12 @@
+data/raw
+data/text
+data/processed
+data/alignment
+data/paper
+data
+models
+wandb
+
+__pycache__/
+*.pyc
+.env

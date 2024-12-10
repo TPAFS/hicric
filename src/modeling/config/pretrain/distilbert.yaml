@@ -1,0 +1,17 @@
+# I/O settings
+wandb_logging: True
+wandb_project: "hicric" # required if wandb_logging is True
+wandb_run_tag: "hicric_pretrain" # required if wandb_logging is True
+
+# Model + data settings
+base_model_name: "distilbert-base-uncased"
+pretrained_hf_model_key: "distilbert/distilbert-base-uncased"
+
+# Training settings
+learning_rate: 1.0e-5
+weight_decay: 0.01
+num_epochs: 50
+batch_size: 86
+dtype: "float16"  # 'float32','float16' for training dtype
+compile: True # Whether to use torch compile
+mask_prob: .15

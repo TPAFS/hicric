@@ -1,0 +1,18 @@
+# I/O settings
+wandb_logging: True
+wandb_project: "hicric" # required if wandb_logging is True
+wandb_run_tag: "hicric_pretrain" # required if wandb_logging is True
+
+# Model + data settings
+base_model_name: "legal-bert-small-uncased"
+pretrained_hf_model_key: "nlpaueb/legal-bert-small-uncased"
+# resume_from_checkpoint: "./models_w_config/fill_mask/legal-bert-small-uncased/checkpoint-2546400"
+
+# Training settings
+learning_rate: 1.0e-5
+weight_decay: 0.01
+num_epochs: 50
+batch_size: 256
+dtype: "float16"  # 'float32','float16' for training dtype
+compile: True # Whether to use torch compile
+mask_prob: .15

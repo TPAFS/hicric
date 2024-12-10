@@ -1,0 +1,14 @@
+# I/O settings
+wandb_logging: True
+wandb_project: "hicric" # required if wandb_logging is True
+wandb_run_tag: "train_background_token_classification" # required if wandb_logging is True
+
+# Model + data settings
+pretrained_hf_classifier: "distilbert/distilbert-base-cased"
+dataset_name: "case-backgrounds"
+
+# Training settings
+learning_rate: 1.0e-6
+weight_decay: .01
+num_epochs: 30
+batch_size: 16
