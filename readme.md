@@ -51,7 +51,7 @@ We believe there are numerous risks associated with our released data, which we'
 - Potential for Propagation of Bias
 - Potential for Misuse
 
-Please see our forthcoming paper for a thorough discussion of these perceived risks.
+Please see our [forthcoming paper](https://drive.google.com/file/d/1vsu0Ns6R6AeTX4-Hf2OdYqRvHD4yNm4y/view?usp=sharing) for a thorough discussion of these perceived risks.
 
 ### Limitations
 
@@ -62,7 +62,7 @@ inform resonsible and effective use. The main categories of limitation are:
 - Simplicity of the Benchmark
 - Corpus Deficiencies
 
-Please see our forthcoming paper for a thorough discussion of these perceived risks.
+Please see our [forthcoming paper](https://drive.google.com/file/d/1vsu0Ns6R6AeTX4-Hf2OdYqRvHD4yNm4y/view?usp=sharing) for a thorough discussion of these perceived risks.
 
 ## Dataset Breakdown
 
