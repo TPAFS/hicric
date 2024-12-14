@@ -5,10 +5,12 @@
 Health Insurance Coverage Rules Interpretation Corpus (HICRIC) is a collection of unannotated text curated to support
 applications that require understanding of U.S. health insurance coverage rules.
 
+It is primarily intended for use in pretraining language models
+and/or, independently, for use as a  knowledge base for retrieval applications.
+
 It consists of:
 
-- An small, unlabeled corpus of authoritative text related to law, contracts, and medicine. This corpus is intended for use in pretraining language models
-and/or, independently, for use as a standalone knowledge base for retrieval applications.
+- An small, unlabeled corpus of authoritative text related to law, contracts, and medicine. 
 - Annotated health insurance case adjudications. This data is intended for use in adjudication related modeling.
 
 ## Using the Data
