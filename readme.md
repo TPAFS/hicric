@@ -2,16 +2,90 @@
 
 <p align="center"><img src="./assets/logo.png" width="300" height="300" /></p>
 
-Health Insurance Coverage Rules Interpretation Corpus (HICRIC) is a collection of unannotated text curated to support
+**H**ealth **I**nsurance **C**overage **R**ules **I**nterpretation **C**orpus (HICRIC) is a curated collection of reputable legal and medical text designed to support
 applications that require understanding of U.S. health insurance coverage rules.
 
-It is primarily intended for use in pretraining language models
-and/or, independently, for use as a  knowledge base for retrieval applications.
+The corpus is comprised of documents from six categories: law, regulatory guidance, coverage rules, policy opinion, case descriptions,
+and clinical guidelines. It is primarily intended for use in pretraining language models and as a knowledge base for retrieval applications.
 
-It consists of:
+The corpus was designed with a specific eye toward supporting patients in pursuing appeals of inappropriate health insurance denials (see the intro of [this article](https://blog.persius.org/investigations/claims_denials) for a primer on appeals). For example, we use the corpus to train our appeal letter generators. Toward the same end, we introduced an appeal outcome adjudication task, and constructed a benchmark dataset to support appeal outcome forecasting. This benchmark, and all related bootstrapping and training
+code are also being released with this data.
 
-- An small, unlabeled corpus of authoritative text related to law, contracts, and medicine. 
-- Annotated health insurance case adjudications. This data is intended for use in adjudication related modeling.
+## Dataset Breakdown
+
+### Corpus
+
+Each document in our corpus comes equipped with a set of plain-text _tags_. In constructing the
+data we formulated a particular privileged set of partitioning tags: these are a set of tags with
+the property that each document in the dataset is associated with exactly one tag in the set,
+and none of the tags are unused.
+
+The tags are the following:
+
+
+- **legal**
+
+- **regulatory-guidance**
+
+- **contract-coverage-rule-medical-policy**
+
+-  **opinion-policy-summary**
+
+-  **case-description**
+
+-  **clinical-guidelines**
+
+In addition to this set of partitioning tags, we introduce another privileged tag:
+
+- **kb** This tag indicates that a document is suitable for use in a knowledge base.
+
+    This is a subjective determination, but the intent is to label text that comes from a reputable,
+    _definitive_ source. For example, a summary of Medicaid rules as stated by an employee of HHS
+    during congressional testimony would not be labeled with the `kb` tag, because such testimony is
+    not the definitive source for the ground truth of such rules. On the other hand, federal
+    law describing those same rules would be labeled with the `kb` tag.
+
+
+A high level characterization of the distribution of text in our corpus in terms of these 
+privileged tags is shown in the table below.
+
+| Category | Num Documents | Words | Chars | Size (GB) |                                                                                                                                     
+| -------- | ------------- | ----- | ----- | --------- |                                                                                                                                     
+| All Partition Parts | 8,310 | 417,617,646 | 2,699,256,987 | 2.81 |                                                                                                                                     
+| kb | 1,434 | 170,717,368 | 1,120,961,295 | 1.13 |                                                                                                                                          
+| legal | 335 | 92,357,802 | 596,044,008 | 0.60 |                                                                                                                                            
+| regulatory-guidance | 1,110 | 5,536,585 | 38,607,587 | 0.04 |                                                                                                                              
+| contract-coverage-rule-medical-policy | 7 | 196,156,813 | 1,228,184,524 | 1.31 |                                                                                                           
+| opinion-policy-summary | 2,094 | 19,462,399 | 133,049,956 | 0.14 |                                                                                                                         
+| case-description | 2,629 | 214,267,074 | 1,351,074,791 | 1.45 |
+| clinical-guidelines | 2,150 | 81,955,020 | 553,041,990 | 0.56 |
+
+
+### Adjudication Benchmark
+
+In addition to our unlabeled corpus, we are releasing a v0 benchmark for an external appeal outcome prediction task.
+
+**External Appeal Adjudication Task Formulation**
+
+Given a description of a denial, predict whether an external appeal
+would result in overturn, uphold, or whether the description is
+insufficient.
+
+
+The benchmark consists of (Background Context, External Appeal Outcome, Sufficiency Label) triples. The background context is brief, 
+non-leaking context extracted from real adjudication summaries. The outcomes are actual binding case determinations 
+made by independent medical reviewers. The sufficiency label is a binary pseudo-label indicating the extent to which the background
+context is sufficient to make an informed prediction about the expected case outcome.
+
+
+Here is an example from the benchmark:
+
+
+<p align="left"><img src="./assets/benchmark_example.png" width="1083" height="680" /></p>
+
+
+
+Please see our [forthcoming paper](https://drive.google.com/file/d/1vsu0Ns6R6AeTX4-Hf2OdYqRvHD4yNm4y/view?usp=sharing) for more details about how and why this benchmark was constructed.
 
 ## Using the Data
 
@@ -63,54 +137,6 @@ inform resonsible and effective use. The main categories of limitation are:
 - Corpus Deficiencies
 
 Please see our [forthcoming paper](https://drive.google.com/file/d/1vsu0Ns6R6AeTX4-Hf2OdYqRvHD4yNm4y/view?usp=sharing) for a thorough discussion of these perceived risks.
-
-## Dataset Breakdown
-
-Each document in our dataset comes equipped with a set of plain-text _tags_. In constructing the
-data we formulated a particular privileged set of partitioning tags: these are a set of tags with
-the property that each document in the dataset is associated with exactly one tag in the set,
-and none of the tags are unused.
-
-The tags are the following:
-
-
-- **legal**
-
-- **regulatory-guidance**
-
-- **contract-coverage-rule-medical-policy**
-
--  **opinion-policy-summary**
-
--  **case-description**
-
--  **clinical-guidelines**
-
-In addition to this set of partitioning tags, we intoduce another privileged tag:
-
-- **kb** This tag indicates that a document is suitable for use in a knowledge base.
-
-    This is a subjective determination, but the intent is to label text that comes from a reputable,
-    _definitive_ source. For example, a summary of Medicaid rules as stated by an employee of HHS
-    during congressional testimony would not be labeled with the `kb` tag, because such testimony is
-    not the definitive source for the ground truth of such rules. On the other hand, federal
-    law describing those same rules would be labeled with the `kb` tag.
-
-
-A high level characterization of the distribution of text in our corpus in terms of these 
-privileged tags is shown in the table below.
-
-| Category | Num Documents | Words | Chars | Size (GB) |                                                                                                                                     
-| -------- | ------------- | ----- | ----- | --------- |                                                                                                                                     
-| All Partition Parts | 8,310 | 417,617,646 | 2,699,256,987 | 2.81 |                                                                                                                                     
-| kb | 1,434 | 170,717,368 | 1,120,961,295 | 1.13 |                                                                                                                                          
-| legal | 335 | 92,357,802 | 596,044,008 | 0.60 |                                                                                                                                            
-| regulatory-guidance | 1,110 | 5,536,585 | 38,607,587 | 0.04 |                                                                                                                              
-| contract-coverage-rule-medical-policy | 7 | 196,156,813 | 1,228,184,524 | 1.31 |                                                                                                           
-| opinion-policy-summary | 2,094 | 19,462,399 | 133,049,956 | 0.14 |                                                                                                                         
-| case-description | 2,629 | 214,267,074 | 1,351,074,791 | 1.45 |
-| clinical-guidelines | 2,150 | 81,955,020 | 553,041,990 | 0.56 |
-
 
 ## Using the Code
 
@@ -375,11 +401,12 @@ In adhering to the attribution clause of the license governing our original data
 For the code, you can use the following citation:
 
 ```latex
-  @software{hicric,
-	author ={Mike Gartner},
-	title={HICRIC: Law, Policy, and Medical Guidance for Health Insurance Coverage Understanding},
-	year={2024},
-    url={https://github.com/TPAFS/hicric}
+  @software{
+  hicric,
+  author ={Mike Gartner},
+  title={HICRIC: Law, Policy, and Medical Guidance for Health Insurance Coverage Understanding},
+  year={2024},
+  url={https://github.com/TPAFS/hicric}
 }
 ```
 
