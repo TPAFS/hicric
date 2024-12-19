@@ -1,0 +1,36 @@
+name: lint_and_format
+on:
+  workflow_dispatch:
+  pull_request:
+    types:
+      - "opened"
+      - "synchronize"
+      - "reopened"
+    branches:
+      - "main"
+      - "dev"
+  push:
+    branches:
+      - "main"
+      - "dev"
+jobs:
+  lint-and-format:
+    name: Lint and format code.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Setup python
+        uses: actions/setup-python@v4
+        with:
+          cache: 'pip'
+          python-version: '3.10' 
+      - name: Install pre-commit
+        run: pip install pre-commit
+      - name: Setup Cache
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit|${{ env.pythonLocation }}|${{ hashFiles('.pre-commit-config.yaml') }}
+      - name: Lint and Format
+        run: pre-commit run --show-diff-on-failure --color=always --all-files

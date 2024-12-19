@@ -1,3 +1,5 @@
+![Linting and Formatting](https://github.com/TPAFS/hicric/actions/workflows/lint_and_format.yml/badge.svg)
+
 # HICRIC: A Dataset of Law, Policy, and Regulatory Guidance for Health Insurance Coverage Understanding
 
 <p align="center"><img src="./assets/logo.png" width="300" height="300" /></p>
