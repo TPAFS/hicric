@@ -192,12 +192,22 @@ if __name__ == "__main__":
         add_jsonl_line(targets_meta_path, target)
 
     # Download targets
+    options = Options()
+    # Configure Firefox profile accordingly
+    firefox_profile = FirefoxProfile()
+    options.profile = firefox_profile
+    # options.add_argument("--headless")
+
+    driver = webdriver.Firefox(options=options)
+
     with open(targets_meta_path, "r") as f:
         lines = f.readlines()
         for idx, line in enumerate(lines):
             print(f"Downloading {idx + 1}/{len(lines)} docs")
             rec = json.loads(line)
-            html = requests.get(rec["url"]).text
+            driver.get(rec["url"])
+            time.sleep(1)
+            html = driver.page_source
             with open(os.path.join(download_dir, rec["policy_number"] + ".html"), "w") as f:
                 f.write(html)
 
