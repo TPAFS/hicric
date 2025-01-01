@@ -20,7 +20,7 @@ def scrape_medical_policies(homepage_url: str) -> list[dict]:
     firefox_profile = FirefoxProfile()
 
     options.profile = firefox_profile
-    # options.add_argument("--headless")
+    options.add_argument("--headless")
 
     driver = webdriver.Firefox(options=options)
 
@@ -85,7 +85,7 @@ def scrape_pharmacy_policies(homepage_url: str) -> list[dict]:
     firefox_profile = FirefoxProfile()
 
     options.profile = firefox_profile
-    # options.add_argument("--headless")
+    options.add_argument("--headless")
 
     driver = webdriver.Firefox(options=options)
 
@@ -196,7 +196,7 @@ if __name__ == "__main__":
     # Configure Firefox profile accordingly
     firefox_profile = FirefoxProfile()
     options.profile = firefox_profile
-    # options.add_argument("--headless")
+    options.add_argument("--headless")
 
     driver = webdriver.Firefox(options=options)
 
