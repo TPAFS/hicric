@@ -13,7 +13,7 @@ polars==0.20.5
 pre-commit==3.7.1
 requests==2.32.0
 torch==2.4.1
-transformers==4.44.0
+transformers==4.48.3
 evaluate
 scikit-learn==1.5.0
 selenium==4.17.2
