@@ -268,14 +268,13 @@ def main(config_path: str) -> None:
     tokenizer_path = os.path.join(ckpt_dir, "tokenizer")
     tokenizer.save_pretrained(tokenizer_path)
 
-    # Save eval results on test set for best model, and threshold maximizing macro F1 on test set.
-    # Need to carefully tune here to get something of sufficient quality, because training data is tiny, and imperfect.
 
     # Load best model
     tokenizer = AutoTokenizer.from_pretrained(ckpt_dir)
     model = AutoModelForSequenceClassification.from_pretrained(ckpt_dir)
 
-    # Eval
+    # Save eval results on test set for best model, and threshold maximizing macro F1 on test set.
+    # Need to carefully tune here to get something of sufficient quality, because training data is tiny, and imperfect.
     eval_results = eval(model, dataset["test"])
     with open(os.path.join(ckpt_dir, "eval_results.json"), "w") as f:
         f.write(json.dumps(eval_results))
