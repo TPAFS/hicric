@@ -39,6 +39,9 @@ def construct_sufficiency_label(raw_label: int) -> int:
         return 0
     elif raw_label >= 3:
         return 1
+    
+    else:
+        raise ValueError(f"Invalid sufficiency score: {raw_label}. Must be between 1 and 5.")
 
 
 def load(jsonl_path: str):
