@@ -271,7 +271,7 @@ def main(config_path: str) -> None:
     # Save eval results on test set for best model, and threshold maximizing macro F1 on test set.
     # Need to carefully tune here to get something of sufficient quality, because training data is tiny, and imperfect.
 
-    # Load best model (model does not reflect best eval_loss model, perhaps user error on HF API)
+    # Load best model
     tokenizer = AutoTokenizer.from_pretrained(ckpt_dir)
     model = AutoModelForSequenceClassification.from_pretrained(ckpt_dir)
 
