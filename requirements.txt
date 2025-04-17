@@ -17,5 +17,6 @@ transformers==4.48.3
 evaluate
 scikit-learn==1.5.0
 selenium==4.17.2
+seqeval==1.2.2
 tqdm==4.66.3
 wandb==0.18.1
