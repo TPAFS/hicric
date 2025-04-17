@@ -11,8 +11,8 @@ pandas==2.1.4
 pdfplumber==0.10.3
 polars==0.20.5
 pre-commit==3.7.1
-requests==2.32.0
-torch==2.4.1
+requests==2.32.3
+torch==2.6.0
 transformers==4.48.3
 evaluate
 scikit-learn==1.5.0
