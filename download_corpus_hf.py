@@ -43,7 +43,7 @@ def repopulate_dir(hf_data_dir: str = "./arrow_data", rehydrate_target_dir: str 
             with open(output_file_path, "a") as writer:
                 writer.write(json.dumps(instance) + "\n")
 
-    print(f"Repopulated data saved to {rehydrate_target_dir}")
+    print(f"Repopulated data saved to {rehydrate_target_dir}/data")
     return None
 
 
