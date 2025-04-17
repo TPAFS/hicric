@@ -4,7 +4,7 @@ wandb_project: "hicric" # required if wandb_logging is True
 wandb_run_tag: "train_sufficiency_classifier" # required if wandb_logging is True
 
 # Model + data settings
-pretrained_hf_classifier: "distilbert/distilbert-base-uncased"
+pretrained_hf_classifier: "distilbert/distilbert-base-cased"
 dataset_name: "case-backgrounds"
 
 # Training settings
