@@ -331,11 +331,8 @@ def main(config_path: str) -> None:
 
     # Print summary of augmentation if used
     if use_data_augmentation:
-        print(
-            f"Training data size before augmentation: {len(dataset['train']) - (len(dataset['test']) * 4)}"
-        )  # Approximation
         print(f"Training data size after augmentation: {len(dataset['train'])}")
-        print(f"Test data size: {len(dataset['test'])}")
+        print(f"Test data size after augmentation: {len(dataset['test'])}")
 
         # Print class distribution
         train_sufficiency = [construct_sufficiency_label(score) for score in dataset["train"]["sufficiency_score"]]
