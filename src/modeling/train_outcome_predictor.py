@@ -219,7 +219,7 @@ def main(config_path: str) -> None:
         num_train_epochs=cfg["num_epochs"],
         weight_decay=cfg["weight_decay"],
         fp16=(cfg["dtype"] == "float16"),
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=1,
         load_best_model_at_end=True,
@@ -234,7 +234,7 @@ def main(config_path: str) -> None:
         args=training_args,
         train_dataset=dataset["train"],
         eval_dataset=dataset["test"],
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics2,
     )
