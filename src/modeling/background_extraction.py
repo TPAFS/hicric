@@ -336,7 +336,7 @@ if __name__ == "__main__":
     background_model = AutoModelForTokenClassification.from_pretrained(trained_model_path)
 
     # Load pretrained sufficiency model
-    pretrained_model_path = "distilbert/distilbert-base-uncased"
+    pretrained_model_path = "distilbert/distilbert-base-cased"
     background_dataset = "case-backgrounds"
     checkpoints_dir = f"./models/sufficiency_predictor/{background_dataset}/{pretrained_model_path}"
     trained_model_path = [f.path for f in os.scandir(checkpoints_dir) if f.is_dir()][
