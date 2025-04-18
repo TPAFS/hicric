@@ -6,7 +6,6 @@ from functools import partial
 
 import evaluate
 import numpy as np
-import wandb
 from datasets import load_dataset
 from transformers import (
     AutoModelForTokenClassification,
@@ -17,6 +16,7 @@ from transformers import (
     TrainingArguments,
 )
 
+import wandb
 from src.modeling.util import load_config
 
 NO_CLASS_ENCODING = 0

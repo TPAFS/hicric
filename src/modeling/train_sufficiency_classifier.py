@@ -7,7 +7,6 @@ from functools import partial
 import numpy as np
 import scipy
 import torch
-import wandb
 from datasets import Dataset
 from sklearn.metrics import (
     accuracy_score,
@@ -24,11 +23,10 @@ from transformers import (
     TrainingArguments,
 )
 
+import wandb
+from src.modeling.data_augmentation import process_and_save_augmentations
 from src.modeling.util import load_config
 from src.util import get_records_list
-from src.modeling.data_augmentation import (
-    process_and_save_augmentations
-)
 
 ID2LABEL = {0: "Insufficient", 1: "Sufficient"}
 LABEL2ID = {v: k for k, v in ID2LABEL.items()}
@@ -41,7 +39,7 @@ def construct_sufficiency_label(raw_label: int) -> int:
         return 0
     elif raw_label >= 3:
         return 1
-    
+
     else:
         raise ValueError(f"Invalid sufficiency score: {raw_label}. Must be between 1 and 5.")
 
@@ -203,33 +201,32 @@ def main(config_path: str) -> None:
     dataset_name = cfg["dataset_name"]
     pretrained_model_key = cfg["pretrained_hf_classifier"]
     dataset_path = f"./data/annotated/{dataset_name}.jsonl"
-    
+
     # Check if we should apply data augmentation
     use_data_augmentation = cfg.get("use_data_augmentation", False)
     save_augmentations = cfg.get("save_augmentations", False)
-    
+
     if use_data_augmentation:
-        
-        generic_rewrite_params = cfg.get("generic_rewrite_params", {
-            "num_augmentations_per_example": 1,
-            "seed": 1,
-            "api_key": os.environ.get("OPENAI_API_KEY")
-        })
-        
-        unrelated_params = cfg.get("unrelated_params", {
-            "num_examples": 500,
-            "seed": 1,
-            "api_key": os.environ.get("OPENAI_API_KEY")
-        })
-        
-        sufficient_augmentation_params = cfg.get("sufficient_augmentation_params", {
-            "num_augmentations_per_example": 1,
-            "api_type": "llamacpp",
-            "model_name": "Meta-Llama-3-8B-Instruct.Q4_K_M.gguf",
-            "seed": 1,
-            "api_key": os.environ.get("OPENAI_API_KEY")
-        })
-        
+        generic_rewrite_params = cfg.get(
+            "generic_rewrite_params",
+            {"num_augmentations_per_example": 1, "seed": 1, "api_key": os.environ.get("OPENAI_API_KEY")},
+        )
+
+        unrelated_params = cfg.get(
+            "unrelated_params", {"num_examples": 500, "seed": 1, "api_key": os.environ.get("OPENAI_API_KEY")}
+        )
+
+        sufficient_augmentation_params = cfg.get(
+            "sufficient_augmentation_params",
+            {
+                "num_augmentations_per_example": 1,
+                "api_type": "llamacpp",
+                "model_name": "Meta-Llama-3-8B-Instruct.Q4_K_M.gguf",
+                "seed": 1,
+                "api_key": os.environ.get("OPENAI_API_KEY"),
+            },
+        )
+
         # Process and get augmented dataset
         augmented_output_path = f"./data/augmented/{dataset_name}_augmented.jsonl" if save_augmentations else None
         train_dataset, test_dataset = process_and_save_augmentations(
@@ -240,9 +237,9 @@ def main(config_path: str) -> None:
             sufficient_augmentation_params=sufficient_augmentation_params,
             train_test_split_ratio=0.2,
             append_to_original=True,  # Include original examples
-            seed=42
+            seed=42,
         )
-        
+
         # Use the datasets returned from the augmentation process
         dataset = {"train": train_dataset, "test": test_dataset}
 
@@ -257,10 +254,10 @@ def main(config_path: str) -> None:
     # Prepare dataset for training
     dataset["train"] = dataset["train"].map(partial(tokenize_batch, tokenizer=tokenizer), batched=True)
     dataset["train"] = dataset["train"].map(add_integral_ids_batch, batched=True)
-    
+
     dataset["test"] = dataset["test"].map(partial(tokenize_batch, tokenizer=tokenizer), batched=True)
     dataset["test"] = dataset["test"].map(add_integral_ids_batch, batched=True)
-    
+
     train_classes = dataset["train"]["label"]
     class_weights = [
         len([c for c in train_classes if c == 1]) / len(train_classes),
@@ -322,7 +319,6 @@ def main(config_path: str) -> None:
     tokenizer_path = os.path.join(ckpt_dir, "tokenizer")
     tokenizer.save_pretrained(tokenizer_path)
 
-
     # Load best model
     tokenizer = AutoTokenizer.from_pretrained(ckpt_dir)
     model = AutoModelForSequenceClassification.from_pretrained(ckpt_dir)
@@ -332,21 +328,23 @@ def main(config_path: str) -> None:
     eval_results = eval(model, dataset["test"])
     with open(os.path.join(ckpt_dir, "eval_results.json"), "w") as f:
         f.write(json.dumps(eval_results))
-        
+
     # Print summary of augmentation if used
     if use_data_augmentation:
-        print(f"Training data size before augmentation: {len(dataset['train']) - (len(dataset['test']) * 4)}")  # Approximation
+        print(
+            f"Training data size before augmentation: {len(dataset['train']) - (len(dataset['test']) * 4)}"
+        )  # Approximation
         print(f"Training data size after augmentation: {len(dataset['train'])}")
         print(f"Test data size: {len(dataset['test'])}")
-        
+
         # Print class distribution
         train_sufficiency = [construct_sufficiency_label(score) for score in dataset["train"]["sufficiency_score"]]
         test_sufficiency = [construct_sufficiency_label(score) for score in dataset["test"]["sufficiency_score"]]
-        
+
         print("Training data class distribution:")
         print(f"  Insufficient (0): {train_sufficiency.count(0)}")
         print(f"  Sufficient (1): {train_sufficiency.count(1)}")
-        
+
         print("Test data class distribution:")
         print(f"  Insufficient (0): {test_sufficiency.count(0)}")
         print(f"  Sufficient (1): {test_sufficiency.count(1)}")
