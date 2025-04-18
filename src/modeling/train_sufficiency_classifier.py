@@ -24,7 +24,10 @@ from transformers import (
 )
 
 import wandb
-from src.modeling.data_augmentation import process_and_save_augmentations
+from src.modeling.data_augmentation import (
+    load_augmented_dataset,
+    process_and_save_augmentations,
+)
 from src.modeling.util import load_config
 from src.util import get_records_list
 
@@ -196,7 +199,6 @@ class TrainerWithClassWeights(Trainer):
 
 def main(config_path: str) -> None:
     cfg = load_config(config_path)
-
     # Load raw dataset
     dataset_name = cfg["dataset_name"]
     pretrained_model_key = cfg["pretrained_hf_classifier"]
@@ -205,17 +207,24 @@ def main(config_path: str) -> None:
     # Check if we should apply data augmentation
     use_data_augmentation = cfg.get("use_data_augmentation", False)
     save_augmentations = cfg.get("save_augmentations", False)
+    use_saved_augmentations = cfg.get("use_saved_augmentations", False)
 
-    if use_data_augmentation:
+    # Define paths for augmented data
+    augmented_train_path = f"./data/augmented/{dataset_name}_augmented_train.jsonl"
+    augmented_test_path = f"./data/augmented/{dataset_name}_augmented_test.jsonl"
+
+    if use_saved_augmentations:
+        # Load from existing saved augmentations
+        print(f"Loading saved augmented datasets from {augmented_train_path} and {augmented_test_path}")
+        dataset = load_augmented_dataset(train_path=augmented_train_path, test_path=augmented_test_path)
+    elif use_data_augmentation:
         generic_rewrite_params = cfg.get(
             "generic_rewrite_params",
             {"num_augmentations_per_example": 1, "seed": 1, "api_key": os.environ.get("OPENAI_API_KEY")},
         )
-
         unrelated_params = cfg.get(
             "unrelated_params", {"num_examples": 500, "seed": 1, "api_key": os.environ.get("OPENAI_API_KEY")}
         )
-
         sufficient_augmentation_params = cfg.get(
             "sufficient_augmentation_params",
             {
@@ -227,11 +236,15 @@ def main(config_path: str) -> None:
             },
         )
 
+        # Set output paths based on save_augmentations flag
+        output_train_path = augmented_train_path if save_augmentations else None
+        output_test_path = augmented_test_path if save_augmentations else None
+
         # Process and get augmented dataset
-        augmented_output_path = f"./data/augmented/{dataset_name}_augmented.jsonl" if save_augmentations else None
         train_dataset, test_dataset = process_and_save_augmentations(
             original_dataset_path=dataset_path,
-            output_dataset_path=augmented_output_path,
+            output_train_path=output_train_path,
+            output_test_path=output_test_path,
             generic_rewrite_params=generic_rewrite_params,
             unrelated_params=unrelated_params,
             sufficient_augmentation_params=sufficient_augmentation_params,
@@ -239,10 +252,8 @@ def main(config_path: str) -> None:
             append_to_original=True,  # Include original examples
             seed=42,
         )
-
         # Use the datasets returned from the augmentation process
         dataset = {"train": train_dataset, "test": test_dataset}
-
     else:
         # Normal loading without augmentation
         dataset = load(dataset_path)
@@ -254,7 +265,6 @@ def main(config_path: str) -> None:
     # Prepare dataset for training
     dataset["train"] = dataset["train"].map(partial(tokenize_batch, tokenizer=tokenizer), batched=True)
     dataset["train"] = dataset["train"].map(add_integral_ids_batch, batched=True)
-
     dataset["test"] = dataset["test"].map(partial(tokenize_batch, tokenizer=tokenizer), batched=True)
     dataset["test"] = dataset["test"].map(add_integral_ids_batch, batched=True)
 
@@ -265,7 +275,6 @@ def main(config_path: str) -> None:
     ]
 
     data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
-
     model = AutoModelForSequenceClassification.from_pretrained(
         pretrained_model_key, num_labels=2, id2label=ID2LABEL, label2id=LABEL2ID
     )
@@ -278,7 +287,6 @@ def main(config_path: str) -> None:
         wandb_project = cfg["wandb_project"]
         run_tag = cfg["wandb_run_tag"]
         wandb_experiment_name = "-".join([run_tag, datetime.datetime.now().strftime("%B-%d-%Y-%I-%M-%p")])
-
         wandb.init(project=wandb_project, name=wandb_experiment_name, config=cfg)
         report_to = "wandb"
 
@@ -330,18 +338,15 @@ def main(config_path: str) -> None:
         f.write(json.dumps(eval_results))
 
     # Print summary of augmentation if used
-    if use_data_augmentation:
+    if use_data_augmentation or use_saved_augmentations:
         print(f"Training data size after augmentation: {len(dataset['train'])}")
         print(f"Test data size after augmentation: {len(dataset['test'])}")
-
         # Print class distribution
         train_sufficiency = [construct_sufficiency_label(score) for score in dataset["train"]["sufficiency_score"]]
         test_sufficiency = [construct_sufficiency_label(score) for score in dataset["test"]["sufficiency_score"]]
-
         print("Training data class distribution:")
         print(f"  Insufficient (0): {train_sufficiency.count(0)}")
         print(f"  Sufficient (1): {train_sufficiency.count(1)}")
-
         print("Test data class distribution:")
         print(f"  Insufficient (0): {test_sufficiency.count(0)}")
         print(f"  Sufficient (1): {test_sufficiency.count(1)}")

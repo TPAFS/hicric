@@ -461,9 +461,46 @@ def augment_sufficient_examples(
     return augmented_examples
 
 
+def load_augmented_dataset(train_path: str, test_path: str) -> dict:
+    """
+    Load saved augmented datasets from train and test paths.
+
+    Args:
+        train_path: Path to the saved augmented training dataset JSONL file
+        test_path: Path to the saved augmented test dataset JSONL file
+
+    Returns:
+        Dictionary with train and test datasets
+    """
+    # Load train records
+    with open(train_path, "r") as f:
+        train_records = [json.loads(line) for line in f]
+
+    # Load test records
+    with open(test_path, "r") as f:
+        test_records = [json.loads(line) for line in f]
+
+    # Extract answers text from records for train
+    train_dataset_records = [
+        {"text": rec["answers"]["text"][0], "sufficiency_score": rec["sufficiency_score"]} for rec in train_records
+    ]
+
+    # Extract answers text from records for test
+    test_dataset_records = [
+        {"text": rec["answers"]["text"][0], "sufficiency_score": rec["sufficiency_score"]} for rec in test_records
+    ]
+
+    # Create datasets
+    train_dataset = Dataset.from_list(train_dataset_records)
+    test_dataset = Dataset.from_list(test_dataset_records)
+
+    return {"train": train_dataset, "test": test_dataset}
+
+
 def process_and_save_augmentations(
     original_dataset_path: str,
-    output_dataset_path: str | None = None,
+    output_train_path: str | None = None,
+    output_test_path: str | None = None,
     generic_rewrite_params: dict | None = None,
     unrelated_params: dict | None = None,
     sufficient_augmentation_params: dict | None = None,
@@ -476,7 +513,8 @@ def process_and_save_augmentations(
 
     Args:
         original_dataset_path: Path to the original dataset JSONL file
-        output_dataset_path: Path to save the augmented dataset (if None, won't save)
+        output_train_path: Path to save the augmented training dataset (if None, won't save)
+        output_test_path: Path to save the augmented test dataset (if None, won't save)
         generic_rewrite_params: Parameters for generic rewrite augmentation (if None, won't apply)
         unrelated_params: Parameters for unrelated content generation (if None, won't apply)
         sufficient_augmentation_params: Parameters for sufficient example augmentation (if None, won't apply)
@@ -564,14 +602,42 @@ def process_and_save_augmentations(
     final_train_dataset = Dataset.from_list(all_train_records)
     final_test_dataset = Dataset.from_list(all_test_records)
 
-    # Save to file if requested
-    if output_dataset_path:
+    # Save train split to file if requested
+    if output_train_path:
         # Create the directory if it doesn't exist
-        os.makedirs(os.path.dirname(output_dataset_path), exist_ok=True)
+        os.makedirs(os.path.dirname(output_train_path), exist_ok=True)
 
         # Format each record with the original dataset structure
-        with open(output_dataset_path, "w") as f:
-            for record in all_train_records + test_records:
+        with open(output_train_path, "w") as f:
+            for record in all_train_records:
+                # Create a full record with the same structure as the original
+                record_key = uuid.uuid4().hex
+                full_record = {
+                    "answers": {"text": [record["text"]], "answer_start": [0]},
+                    "id": f"augmented_{record_key}",
+                    "question": "What is the background context in this case summary?",
+                    "title": f"augmented_{record_key}",
+                    "sufficiency_score": record["sufficiency_score"],
+                }
+
+                # Add metadata if available
+                if "source_text" in record or "source_score" in record or "augmentation_type" in record:
+                    full_record["metadata"] = {
+                        "source_text": record.get("source_text"),
+                        "source_score": record.get("source_score"),
+                        "augmentation_type": record.get("augmentation_type"),
+                    }
+
+                f.write(json.dumps(full_record) + "\n")
+
+    # Save test split to file if requested
+    if output_test_path:
+        # Create the directory if it doesn't exist
+        os.makedirs(os.path.dirname(output_test_path), exist_ok=True)
+
+        # Format each record with the original dataset structure
+        with open(output_test_path, "w") as f:
+            for record in all_test_records:
                 # Create a full record with the same structure as the original
                 record_key = uuid.uuid4().hex
                 full_record = {

@@ -17,6 +17,7 @@ dtype: "float16"  # 'float32','float16' for training dtype
 
 use_data_augmentation: true
 save_augmentations: true
+use_saved_augmentations: false
 
 sufficient_augmentation_params:
   api_type: openai
