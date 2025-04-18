@@ -213,6 +213,9 @@ def main(config_path: str) -> None:
     augmented_train_path = f"./data/augmented/{dataset_name}_augmented_train.jsonl"
     augmented_test_path = f"./data/augmented/{dataset_name}_augmented_test.jsonl"
 
+    # Load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(pretrained_model_key, model_max_length=512, truncation=True)
+
     if use_saved_augmentations:
         # Load from existing saved augmentations
         print(f"Loading saved augmented datasets from {augmented_train_path} and {augmented_test_path}")
@@ -254,19 +257,17 @@ def main(config_path: str) -> None:
         )
         # Use the datasets returned from the augmentation process
         dataset = {"train": train_dataset, "test": test_dataset}
+        # Prepare dataset for training
+        dataset["train"] = dataset["train"].map(partial(tokenize_batch, tokenizer=tokenizer), batched=True)
+        dataset["train"] = dataset["train"].map(add_integral_ids_batch, batched=True)
+        dataset["test"] = dataset["test"].map(partial(tokenize_batch, tokenizer=tokenizer), batched=True)
+        dataset["test"] = dataset["test"].map(add_integral_ids_batch, batched=True)
     else:
         # Normal loading without augmentation
         dataset = load(dataset_path)
+        dataset = dataset.map(partial(tokenize_batch, tokenizer=tokenizer), batched=True)
+        dataset = dataset.map(add_integral_ids_batch, batched=True)
         dataset = split(dataset)
-
-    # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(pretrained_model_key, model_max_length=512, truncation=True)
-
-    # Prepare dataset for training
-    dataset["train"] = dataset["train"].map(partial(tokenize_batch, tokenizer=tokenizer), batched=True)
-    dataset["train"] = dataset["train"].map(add_integral_ids_batch, batched=True)
-    dataset["test"] = dataset["test"].map(partial(tokenize_batch, tokenizer=tokenizer), batched=True)
-    dataset["test"] = dataset["test"].map(add_integral_ids_batch, batched=True)
 
     train_classes = dataset["train"]["label"]
     class_weights = [
