@@ -1,4 +1,3 @@
-# Sequence classification for background sufficiency
 import argparse
 import datetime
 import json
@@ -27,6 +26,9 @@ from transformers import (
 
 from src.modeling.util import load_config
 from src.util import get_records_list
+from src.modeling.data_augmentation import (
+    process_and_save_augmentations
+)
 
 ID2LABEL = {0: "Insufficient", 1: "Sufficient"}
 LABEL2ID = {v: k for k, v in ID2LABEL.items()}
@@ -46,8 +48,8 @@ def construct_sufficiency_label(raw_label: int) -> int:
 
 def load(jsonl_path: str):
     recs = get_records_list(jsonl_path)
-    recs = [{"text": rec["answers"]["text"][0], "sufficiency_score": rec["sufficiency_score"]} for rec in recs]
-    dataset = Dataset.from_list(recs)
+    updated_recs = [{"text": rec["answers"]["text"][0], "sufficiency_score": rec["sufficiency_score"]} for rec in recs]
+    dataset = Dataset.from_list(updated_recs)
     return dataset
 
 
@@ -178,7 +180,7 @@ class TrainerWithClassWeights(Trainer):
         super().__init__(*args, **kwargs)
         self.class_weights = class_weights
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         labels = inputs.pop("labels")
         outputs = model(**inputs)
         # Save past state if it exists
@@ -201,15 +203,64 @@ def main(config_path: str) -> None:
     dataset_name = cfg["dataset_name"]
     pretrained_model_key = cfg["pretrained_hf_classifier"]
     dataset_path = f"./data/annotated/{dataset_name}.jsonl"
-    dataset = load(dataset_path)
+    
+    # Check if we should apply data augmentation
+    use_data_augmentation = cfg.get("use_data_augmentation", False)
+    save_augmentations = cfg.get("save_augmentations", False)
+    
+    if use_data_augmentation:
+        
+        generic_rewrite_params = cfg.get("generic_rewrite_params", {
+            "num_augmentations_per_example": 1,
+            "seed": 1,
+            "api_key": os.environ.get("OPENAI_API_KEY")
+        })
+        
+        unrelated_params = cfg.get("unrelated_params", {
+            "num_examples": 500,
+            "seed": 1,
+            "api_key": os.environ.get("OPENAI_API_KEY")
+        })
+        
+        sufficient_augmentation_params = cfg.get("sufficient_augmentation_params", {
+            "num_augmentations_per_example": 1,
+            "api_type": "llamacpp",
+            "model_name": "Meta-Llama-3-8B-Instruct.Q4_K_M.gguf",
+            "seed": 1,
+            "api_key": os.environ.get("OPENAI_API_KEY")
+        })
+        
+        # Process and get augmented dataset
+        augmented_output_path = f"./data/augmented/{dataset_name}_augmented.jsonl" if save_augmentations else None
+        train_dataset, test_dataset = process_and_save_augmentations(
+            original_dataset_path=dataset_path,
+            output_dataset_path=augmented_output_path,
+            generic_rewrite_params=generic_rewrite_params,
+            unrelated_params=unrelated_params,
+            sufficient_augmentation_params=sufficient_augmentation_params,
+            train_test_split_ratio=0.2,
+            append_to_original=True,  # Include original examples
+            seed=42
+        )
+        
+        # Use the datasets returned from the augmentation process
+        dataset = {"train": train_dataset, "test": test_dataset}
+
+    else:
+        # Normal loading without augmentation
+        dataset = load(dataset_path)
+        dataset = split(dataset)
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_key, model_max_length=512, truncation=True)
 
     # Prepare dataset for training
-    dataset = dataset.map(partial(tokenize_batch, tokenizer=tokenizer), batched=True)
-    dataset = dataset.map(add_integral_ids_batch, batched=True)
-    dataset = split(dataset)
+    dataset["train"] = dataset["train"].map(partial(tokenize_batch, tokenizer=tokenizer), batched=True)
+    dataset["train"] = dataset["train"].map(add_integral_ids_batch, batched=True)
+    
+    dataset["test"] = dataset["test"].map(partial(tokenize_batch, tokenizer=tokenizer), batched=True)
+    dataset["test"] = dataset["test"].map(add_integral_ids_batch, batched=True)
+    
     train_classes = dataset["train"]["label"]
     class_weights = [
         len([c for c in train_classes if c == 1]) / len(train_classes),
@@ -242,7 +293,7 @@ def main(config_path: str) -> None:
         num_train_epochs=cfg["num_epochs"],
         weight_decay=cfg["weight_decay"],
         fp16=(cfg["dtype"] == "float16"),
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=1,
         load_best_model_at_end=True,
@@ -255,7 +306,7 @@ def main(config_path: str) -> None:
         model=model,
         train_dataset=dataset["train"],
         eval_dataset=dataset["test"],
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics,
     )
@@ -281,6 +332,24 @@ def main(config_path: str) -> None:
     eval_results = eval(model, dataset["test"])
     with open(os.path.join(ckpt_dir, "eval_results.json"), "w") as f:
         f.write(json.dumps(eval_results))
+        
+    # Print summary of augmentation if used
+    if use_data_augmentation:
+        print(f"Training data size before augmentation: {len(dataset['train']) - (len(dataset['test']) * 4)}")  # Approximation
+        print(f"Training data size after augmentation: {len(dataset['train'])}")
+        print(f"Test data size: {len(dataset['test'])}")
+        
+        # Print class distribution
+        train_sufficiency = [construct_sufficiency_label(score) for score in dataset["train"]["sufficiency_score"]]
+        test_sufficiency = [construct_sufficiency_label(score) for score in dataset["test"]["sufficiency_score"]]
+        
+        print("Training data class distribution:")
+        print(f"  Insufficient (0): {train_sufficiency.count(0)}")
+        print(f"  Sufficient (1): {train_sufficiency.count(1)}")
+        
+        print("Test data class distribution:")
+        print(f"  Insufficient (0): {test_sufficiency.count(0)}")
+        print(f"  Sufficient (1): {test_sufficiency.count(1)}")
 
     return None
 

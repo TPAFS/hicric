@@ -1,0 +1,24 @@
+# I/O settings
+wandb_logging: True
+wandb_project: "hicric" # required if wandb_logging is True
+wandb_run_tag: "train_sufficiency_classifier" # required if wandb_logging is True
+
+# Model + data settings
+pretrained_hf_classifier: "distilbert/distilbert-base-cased"
+dataset_name: "case-backgrounds"
+
+# Training settings
+learning_rate: 3.0e-7
+weight_decay: 0.0
+num_epochs: 15
+batch_size: 12
+dtype: "float16"  # 'float32','float16' for training dtype
+
+
+use_data_augmentation: true
+save_augmentations: true
+
+sufficient_augmentation_params:
+  api_type: openai
+  api_url: https://api.openai.com/v1/chat/completions
+  model_name: gpt-4o
