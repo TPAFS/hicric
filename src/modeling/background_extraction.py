@@ -210,6 +210,8 @@ def construct_recs(raw_recs: list[dict], tokenizer: AutoTokenizer, model: torch.
             "decision": rec["decision"],
             "appeal_type": rec["appeal_type"],
             "full_text": rec["text"],
+            "jurisdiction": rec.get("jurisdiction", "Unspecified"),
+            "insurance_type": rec.get("insurance_type", "Unspecified"),
         }
         backgrounds.append(updated_record)
         idx += 1
@@ -241,6 +243,8 @@ def construct_recs_batch(
                 "appeal_type": rec["appeal_type"],
                 "full_text": rec["text"],
                 "sufficiency_id": sufficiency_id,
+                "jurisdiction": rec.get("jurisdiction", "Unspecified"),
+                "insurance_type": rec.get("insurance_type", "Unspecified"),
             }
             for (rec, background, sufficiency_id) in zip(batch, background_batch, sufficiency_batch)
         ]
@@ -336,7 +340,7 @@ if __name__ == "__main__":
     background_model = AutoModelForTokenClassification.from_pretrained(trained_model_path)
 
     # Load pretrained sufficiency model
-    pretrained_model_path = "distilbert/distilbert-base-cased"
+    pretrained_model_path = "distilbert/distilbert-base-uncased"
     background_dataset = "case-backgrounds"
     checkpoints_dir = f"./models/sufficiency_predictor/{background_dataset}/{pretrained_model_path}"
     trained_model_path = [f.path for f in os.scandir(checkpoints_dir) if f.is_dir()][
@@ -361,7 +365,7 @@ if __name__ == "__main__":
     # Combine CA CDI files into single jsonl
     combine_jsonl("./data/processed/ca_cdi/summaries")
 
-    # Define Outcome Map / preprocessing
+    # Define Outcome Map / preprocessing and jurisdiction mapping
     # TODO: decide if this standardization belongs here, or in raw dataset storage (i.e in records we read here)
     extraction_targets = [
         (
@@ -396,7 +400,7 @@ if __name__ == "__main__":
     test_out_path = "./data/outcomes/test_backgrounds_suff.jsonl"
     train_subset = []
     test_subset = []
-    for path, outcome_map in extraction_targets:
+    for path, outcome_map, jurisdiction, insurance_type in extraction_targets:
         print(f"Processing dataset at {path}")
 
         # Get records and standardize outcome labels

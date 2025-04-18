@@ -63,6 +63,8 @@ def process(source_lineitem: dict, output_dirname: str) -> dict:
             "treatment": treatment,
             "decision": decision,
             "patient_race": patient_race,
+            "jurisdiction": "CA",
+            "insurance_type": "Commercial",
         }
         add_jsonl_line(outfile, line_data)
 

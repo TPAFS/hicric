@@ -5,6 +5,7 @@ from functools import partial
 
 import numpy as np
 import scipy
+import torch
 from datasets import Dataset, load_dataset
 from sklearn.metrics import (
     accuracy_score,
@@ -27,16 +28,24 @@ from src.util import get_records_list
 
 ID2LABEL = {0: "Insufficient", 1: "Upheld", 2: "Overturned"}
 LABEL2ID = {v: k for k, v in ID2LABEL.items()}
+
+# Define mappings for jurisdiction and insurance type
+JURISDICTION_MAP = {"NY": 0, "CA": 1, "Unspecified": 2}
+INSURANCE_TYPE_MAP = {"Commercial": 0, "Medicaid": 1, "Unspecified": 2}
+
 OUTPUT_DIR = "./models/overturn_predictor"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 def load_and_split(
-    jsonl_path: str, test_size: float = 0.2, filter_keys: list = ["decision", "text", "sufficiency_id"], seed: int = 2
+    jsonl_path: str,
+    test_size: float = 0.2,
+    filter_keys: list = ["decision", "text", "sufficiency_id", "jurisdiction", "insurance_type"],
+    seed: int = 2,
 ) -> Dataset:
     if len(filter_keys) > 0:
         recs = get_records_list(jsonl_path)
-        recs = [{key: rec[key] for key in filter_keys} for rec in recs]
+        recs = [{key: rec.get(key, "Unspecified") for key in filter_keys} for rec in recs]
         dataset = Dataset.from_list(recs)
     else:
         dataset = load_dataset("json", data_files=jsonl_path)["train"]
@@ -59,10 +68,20 @@ def construct_label(outcome: str, sufficiency_id: int, label2id: dict) -> int:
         return label2id[outcome]
 
 
-def add_integral_ids_batch(examples, label2id: dict):
+def add_integral_ids_batch(examples, label2id: dict, jurisdiction_map: dict, insurance_type_map: dict):
     outcomes = examples["decision"]
     sufficiency_ids = examples["sufficiency_id"]
+
+    # Map jurisdiction and insurance_type to their respective IDs
+    jurisdictions = examples.get("jurisdiction", ["Unspecified"] * len(outcomes))
+    insurance_types = examples.get("insurance_type", ["Unspecified"] * len(outcomes))
+
     examples["label"] = [construct_label(outcome, id, label2id) for (outcome, id) in zip(outcomes, sufficiency_ids)]
+    examples["jurisdiction_id"] = [jurisdiction_map.get(j, jurisdiction_map["Unspecified"]) for j in jurisdictions]
+    examples["insurance_type_id"] = [
+        insurance_type_map.get(i, insurance_type_map["Unspecified"]) for i in insurance_types
+    ]
+
     return examples
 
 
@@ -155,6 +174,89 @@ def compute_metrics2(eval_pred) -> dict:
     return best_metrics
 
 
+# Custom model class to handle the additional features
+class TextClassificationWithMetadata(AutoModelForSequenceClassification):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Add embeddings for jurisdiction and insurance type (2 categories each + unspecified)
+        # We'll use 0 and 1 for the specific categories, and handle unspecified (2) separately
+        self.jurisdiction_embeddings = torch.nn.Embedding(3, 16)
+        self.insurance_type_embeddings = torch.nn.Embedding(3, 16)
+
+        # Initialize the unspecified embeddings to be the average of the others
+        with torch.no_grad():
+            # Initialize the unspecified embedding (index 2) as zeros
+            # It will be dynamically computed during forward pass
+            self.jurisdiction_embeddings.weight[2].fill_(0)
+            self.insurance_type_embeddings.weight[2].fill_(0)
+
+        # Adjust the classifier to include these additional features
+        config = self.config
+        hidden_size = config.hidden_size
+
+        # Create a new classifier with the additional features
+        self.classifier = torch.nn.Linear(hidden_size + 32, config.num_labels)
+
+    def forward(self, input_ids=None, attention_mask=None, jurisdiction_id=None, insurance_type_id=None, **kwargs):
+        # Get the default output from parent
+        outputs = super().forward(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
+
+        # If we're not using the additional features, return the default outputs
+        if jurisdiction_id is None or insurance_type_id is None:
+            return outputs
+
+        # Create masks for where the IDs are "Unspecified" (value 2)
+        j_unspecified_mask = jurisdiction_id == 2
+        i_unspecified_mask = insurance_type_id == 2
+
+        # Get embeddings for the additional features
+        j_embeddings = self.jurisdiction_embeddings(jurisdiction_id)
+        i_embeddings = self.insurance_type_embeddings(insurance_type_id)
+
+        # For unspecified jurisdiction, use the average of NY and CA embeddings
+        if j_unspecified_mask.any():
+            # Calculate average of specific jurisdiction embeddings (indices 0 and 1)
+            avg_j_embedding = (self.jurisdiction_embeddings.weight[0] + self.jurisdiction_embeddings.weight[1]) / 2
+
+            # Apply the average embedding where jurisdiction is unspecified
+            j_embeddings[j_unspecified_mask] = avg_j_embedding
+
+        # For unspecified insurance_type, use the average of Commercial and Medicaid embeddings
+        if i_unspecified_mask.any():
+            # Calculate average of specific insurance_type embeddings (indices 0 and 1)
+            avg_i_embedding = (self.insurance_type_embeddings.weight[0] + self.insurance_type_embeddings.weight[1]) / 2
+
+            # Apply the average embedding where insurance_type is unspecified
+            i_embeddings[i_unspecified_mask] = avg_i_embedding
+
+        # Concatenate with the pooled output
+        pooled_output = outputs.pooler_output
+        combined_features = torch.cat([pooled_output, j_embeddings, i_embeddings], dim=1)
+
+        # Pass through the classifier
+        logits = self.classifier(combined_features)
+
+        # Replace the logits in the outputs
+        outputs.logits = logits
+
+        return outputs
+
+
+# Custom collator to handle the additional features
+class DataCollatorWithMetadata(DataCollatorWithPadding):
+    def __call__(self, features):
+        batch = super().__call__(features)
+
+        # Add the jurisdiction and insurance type IDs to the batch
+        if "jurisdiction_id" in features[0]:
+            batch["jurisdiction_id"] = torch.tensor([f["jurisdiction_id"] for f in features])
+
+        if "insurance_type_id" in features[0]:
+            batch["insurance_type_id"] = torch.tensor([f["insurance_type_id"] for f in features])
+
+        return batch
+
+
 def main(config_path: str) -> None:
     cfg = load_config(config_path)
 
@@ -193,16 +295,37 @@ def main(config_path: str) -> None:
 
     # Prepare dataset for training
     dataset = dataset.map(partial(tokenize_batch, tokenizer=tokenizer), batched=True)
-    dataset = dataset.map(partial(add_integral_ids_batch, label2id=LABEL2ID), batched=True)
+    dataset = dataset.map(
+        partial(
+            add_integral_ids_batch,
+            label2id=LABEL2ID,
+            jurisdiction_map=JURISDICTION_MAP,
+            insurance_type_map=INSURANCE_TYPE_MAP,
+        ),
+        batched=True,
+    )
 
-    data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
+    # Use our custom data collator that handles the additional features
+    data_collator = DataCollatorWithMetadata(tokenizer=tokenizer)
 
-    model = AutoModelForSequenceClassification.from_pretrained(
+    # Load the base model
+    base_model = AutoModelForSequenceClassification.from_pretrained(
         pretrained_model_key,
         num_labels=3,
         id2label=ID2LABEL,
         label2id=LABEL2ID,
     )
+
+    # Create our custom model
+    model = TextClassificationWithMetadata.from_pretrained(
+        pretrained_model_key,
+        num_labels=3,
+        id2label=ID2LABEL,
+        label2id=LABEL2ID,
+    )
+
+    # Copy weights from base model to our custom model
+    model.load_state_dict(base_model.state_dict(), strict=False)
 
     # Handle annoyance with HF / pretrained legalbert bug/user error
     # HF trainer complains of param data not being contiguous when loading checkpoints
