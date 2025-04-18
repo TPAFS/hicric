@@ -140,7 +140,7 @@ def main(config_path: str) -> None:
         per_device_eval_batch_size=cfg["batch_size"],
         num_train_epochs=cfg["num_epochs"],
         weight_decay=cfg["weight_decay"],
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         save_strategy="epoch",
         load_best_model_at_end=True,
         push_to_hub=False,
@@ -153,7 +153,7 @@ def main(config_path: str) -> None:
         args=training_args,
         train_dataset=processed["train"],
         eval_dataset=processed["test"],
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
         compute_metrics=partial(compute_metrics, label_list=LABEL_LIST, seqeval=seqeval),
     )
