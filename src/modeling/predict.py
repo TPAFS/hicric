@@ -29,12 +29,12 @@ if __name__ == "__main__":
     LABEL2ID = {v: k for k, v in ID2LABEL.items()}
 
     # Load model and tokenizer
-    pretrained_model_key = "distilbert/distilbert-base-uncased"
+    pretrained_model_key = "distilbert/distilbert-base-cased"
 
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_key, model_max_length=512)
 
-    dataset_name = "train_backgrounds_suff"
-    checkpoints_dir = os.path.join(MODEL_DIR, dataset_name, pretrained_model_key)
+    dataset_name = "train_backgrounds_suff_augmented"
+    checkpoints_dir = os.path.join(MODEL_DIR, dataset_name, "distilbert")
     checkpoint_dirs = sorted(os.listdir(checkpoints_dir))
     checkpoint_name = checkpoint_dirs[0]
     ckpt_path = os.path.join(checkpoints_dir, checkpoint_name)
@@ -77,7 +77,7 @@ if __name__ == "__main__":
     )
 
     # Pytorch quantized model
-    model = classifier.model
+    model = classifier.model.to("cpu")
     # TODO: Fix this, this is not the right model to be quantizing via the torch or onnx ops below.
     model_int8 = torch.ao.quantization.quantize_dynamic(
         model,  # the original model
