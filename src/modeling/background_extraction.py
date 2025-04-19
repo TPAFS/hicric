@@ -3,6 +3,7 @@ import os
 from multiprocessing import Pool, cpu_count
 
 import torch
+from datasets import Dataset
 from rapidfuzz import fuzz
 from sklearn.model_selection import train_test_split
 from transformers import (
@@ -11,6 +12,11 @@ from transformers import (
     AutoTokenizer,
 )
 
+from src.modeling.data_augmentation import (
+    augment_sufficient_examples,
+    generate_unrelated_content,
+    rewrite_to_generic,
+)
 from src.util import add_jsonl_lines, batcher, get_records_list
 
 
@@ -323,6 +329,217 @@ def combine_jsonl(directory) -> None:
     return None
 
 
+def create_augmented_examples(
+    records: list[dict],
+    api_type: str = "openai",
+    api_url: str = "https://api.openai.com/v1/chat/completions",
+    api_key: str | None = None,
+    model_name: str = "gpt-4o",
+    generic_rewrites_per_example: int = 1,
+    sufficient_augmentations_per_example: int = 1,
+    num_unrelated_examples: int = 100,
+    api_call_limit: int | None = 700,
+    seed: int = 42,
+) -> list[dict]:
+    """
+    Create augmented examples from background texts with optional limit on API calls.
+
+    Args:
+        records: List of record dictionaries with text, decision, etc.
+        api_type: Type of API to use ("openai" or "llamacpp")
+        api_url: URL for the API endpoint
+        model_name: Name of the model to use
+        generic_rewrites_per_example: Number of generic rewrites per sufficient example
+        sufficient_augmentations_per_example: Number of sufficient augmentations per sufficient example
+        num_unrelated_examples: Number of unrelated content examples to generate
+        api_call_limit: Maximum number of API calls to make (if None, no limit)
+        seed: Random seed for reproducibility
+
+    Returns:
+        List of augmented record dictionaries
+    """
+    import random
+
+    random.seed(seed)
+
+    print(f"Creating augmented examples using {api_type} API at {api_url}...")
+    augmented_records = []
+
+    # Track API calls
+    api_calls_made = 0
+
+    # 1. Create dataset for augmentation functions
+    dataset_records = []
+    for rec in records:
+        # Check if record has sufficiency_id
+        sufficiency_score = 4  # Default to sufficient for original records
+        if "sufficiency_id" in rec:
+            sufficiency_score = 4 if rec["sufficiency_id"] == 1 else 2
+
+        dataset_records.append({"text": rec["text"], "sufficiency_score": sufficiency_score})
+
+    dataset = Dataset.from_list(dataset_records)
+
+    # If we have a limit, we need to randomly select which examples to augment
+    sufficient_examples = [ex for ex in dataset_records if ex["sufficiency_score"] >= 3]
+    num_sufficient = len(sufficient_examples)
+
+    # Calculate how many API calls each technique would require
+    total_generic_calls = num_sufficient * generic_rewrites_per_example
+    total_sufficient_calls = num_sufficient * sufficient_augmentations_per_example
+    total_unrelated_calls = num_unrelated_examples
+
+    # Calculate total potential API calls
+    total_potential_calls = total_generic_calls + total_sufficient_calls + total_unrelated_calls
+
+    # If we have a limit and it's less than the potential total, adjust
+    if api_call_limit is not None and api_call_limit < total_potential_calls:
+        print(f"API call limit ({api_call_limit}) is less than potential total ({total_potential_calls})")
+
+        # Distribute the limit evenly across the three techniques
+        calls_per_technique = api_call_limit // 3
+
+        # Calculate adjusted calls for each technique
+        adjusted_generic_calls = calls_per_technique
+        adjusted_sufficient_calls = calls_per_technique
+        adjusted_unrelated_calls = (
+            api_call_limit - adjusted_generic_calls - adjusted_sufficient_calls
+        )  # Use remainder for unrelated
+
+        # Calculate how many examples we can augment for each technique
+        examples_for_generic = adjusted_generic_calls // generic_rewrites_per_example
+        examples_for_sufficient = adjusted_sufficient_calls // sufficient_augmentations_per_example
+
+        # Randomly select examples to augment
+        if examples_for_generic < num_sufficient:
+            examples_generic = random.sample(sufficient_examples, examples_for_generic)
+        else:
+            examples_generic = sufficient_examples
+
+        if examples_for_sufficient < num_sufficient:
+            examples_sufficient = random.sample(sufficient_examples, examples_for_sufficient)
+        else:
+            examples_sufficient = sufficient_examples
+
+        # Adjust unrelated examples count
+        adjusted_num_unrelated = adjusted_unrelated_calls
+
+        print("Adjusted numbers based on API call limit:")
+        print(f"  Generic rewrites: {examples_for_generic} examples ({adjusted_generic_calls} calls)")
+        print(f"  Sufficient augmentations: {examples_for_sufficient} examples ({adjusted_sufficient_calls} calls)")
+        print(f"  Unrelated content: {adjusted_num_unrelated} examples ({adjusted_unrelated_calls} calls)")
+
+        # Create filtered datasets for limited augmentation
+        generic_dataset = Dataset.from_list(examples_generic)
+        sufficient_dataset = Dataset.from_list(examples_sufficient)
+
+        # Update parameters
+        generic_params_count = adjusted_generic_calls
+        sufficient_params_count = adjusted_sufficient_calls
+        unrelated_params_count = adjusted_unrelated_calls
+    else:
+        # No limit or limit is high enough, use all examples
+        generic_dataset = dataset
+        sufficient_dataset = dataset
+        generic_params_count = total_generic_calls
+        sufficient_params_count = total_sufficient_calls
+        unrelated_params_count = num_unrelated_examples
+
+    # 2. Apply generic rewrite augmentation (make sufficient examples insufficient)
+    if generic_params_count > 0:
+        print("Generating generic rewrites...")
+        generic_rewrite_params = {
+            "num_augmentations_per_example": generic_rewrites_per_example,
+            "api_type": api_type,
+            "api_url": api_url,
+            "api_key": api_key,
+            "model_name": model_name,
+            "seed": seed,
+        }
+
+        generic_examples = rewrite_to_generic(generic_dataset, **generic_rewrite_params)
+        api_calls_made += len(generic_examples)
+        print(f"Generated {len(generic_examples)} examples through generic rewriting")
+    else:
+        generic_examples = []
+        print("Skipping generic rewrites due to API call limit")
+
+    # 3. Apply sufficient example augmentation (keep sufficient examples sufficient)
+    if sufficient_params_count > 0:
+        print("Generating sufficient augmentations...")
+        sufficient_augmentation_params = {
+            "num_augmentations_per_example": sufficient_augmentations_per_example,
+            "api_type": api_type,
+            "api_url": api_url,
+            "api_key": api_key,
+            "model_name": model_name,
+            "seed": seed,
+        }
+
+        sufficient_examples = augment_sufficient_examples(sufficient_dataset, **sufficient_augmentation_params)
+        api_calls_made += len(sufficient_examples)
+        print(f"Generated {len(sufficient_examples)} augmented sufficient examples")
+    else:
+        sufficient_examples = []
+        print("Skipping sufficient augmentations due to API call limit")
+
+    # 4. Generate unrelated content
+    if unrelated_params_count > 0:
+        print("Generating unrelated content...")
+        unrelated_params = {
+            "num_examples": unrelated_params_count,
+            "api_type": api_type,
+            "api_url": api_url,
+            "api_key": api_key,
+            "model_name": model_name,
+            "seed": seed,
+        }
+
+        unrelated_examples = generate_unrelated_content(**unrelated_params)
+        api_calls_made += len(unrelated_examples)
+        print(f"Generated {len(unrelated_examples)} examples with unrelated content")
+    else:
+        unrelated_examples = []
+        print("Skipping unrelated content due to API call limit")
+
+    # 5. Convert augmented texts back to record format
+    # For generic rewrites and sufficient augmentations, we need to find the original record
+    all_records_dict = {rec["text"]: rec for rec in records}
+
+    for aug_example in generic_examples + sufficient_examples:
+        source_text = aug_example["source_text"]
+        # Find the original record
+        original_rec = all_records_dict.get(source_text)
+        if original_rec:
+            augmented_rec = original_rec.copy()
+            augmented_rec["text"] = aug_example["text"]
+            augmented_rec["sufficiency_id"] = 1 if aug_example["sufficiency_score"] >= 3 else 0
+            augmented_rec["augmentation_type"] = aug_example["augmentation_type"]
+            augmented_records.append(augmented_rec)
+
+    # For unrelated content, create new records with random decision label
+    decisions = ["Upheld", "Overturned"]
+    appeal_types = ["IMR", "DMHC", "CDI"]  # Example appeal types
+
+    for i, aug_example in enumerate(unrelated_examples):
+        augmented_rec = {
+            "text": aug_example["text"],
+            "decision": random.choice(decisions),  # Random decision since unrelated to actual cases
+            "appeal_type": random.choice(appeal_types),
+            "full_text": aug_example["text"],  # No original full text
+            "sufficiency_id": 0,  # Always insufficient
+            "jurisdiction": "Unspecified",
+            "insurance_type": "Unspecified",
+            "augmentation_type": aug_example["augmentation_type"],
+            "id": f"unrelated_{i}",
+        }
+        augmented_records.append(augmented_rec)
+
+    print(f"Total API calls made: {api_calls_made}")
+    print(f"Total augmented records created: {len(augmented_records)}")
+    return augmented_records
+
+
 if __name__ == "__main__":
     # Config applied to both models
     device = "cuda"
@@ -340,7 +557,7 @@ if __name__ == "__main__":
     background_model = AutoModelForTokenClassification.from_pretrained(trained_model_path)
 
     # Load pretrained sufficiency model
-    pretrained_model_path = "distilbert/distilbert-base-uncased"
+    pretrained_model_path = "distilbert/distilbert-base-cased"
     background_dataset = "case-backgrounds"
     checkpoints_dir = f"./models/sufficiency_predictor/{background_dataset}/{pretrained_model_path}"
     trained_model_path = [f.path for f in os.scandir(checkpoints_dir) if f.is_dir()][
@@ -398,9 +615,14 @@ if __name__ == "__main__":
     # We will also split a train and test set for consistent experiments
     train_out_path = "./data/outcomes/train_backgrounds_suff.jsonl"
     test_out_path = "./data/outcomes/test_backgrounds_suff.jsonl"
+
+    # New paths for augmented datasets
+    train_augmented_out_path = "./data/outcomes/train_backgrounds_suff_augmented.jsonl"
+    test_augmented_out_path = "./data/outcomes/test_backgrounds_suff_augmented.jsonl"
+
     train_subset = []
     test_subset = []
-    for path, outcome_map, jurisdiction, insurance_type in extraction_targets:
+    for path, outcome_map in extraction_targets:
         print(f"Processing dataset at {path}")
 
         # Get records and standardize outcome labels
@@ -437,5 +659,74 @@ if __name__ == "__main__":
         train_subset.extend(train_recs)
         test_subset.extend(val_recs)
 
+    # Write original train and test sets
     add_jsonl_lines(train_out_path, train_subset)
     add_jsonl_lines(test_out_path, test_subset)
+
+    print(f"Original train set: {len(train_subset)} examples")
+    print(f"Original test set: {len(test_subset)} examples")
+
+    # Check for OpenAI API key in environment variable
+    api_key = os.environ.get("OPENAI_API_KEY")
+    api_type = "openai" if api_key else "llamacpp"
+    api_url = "https://api.openai.com/v1/chat/completions" if api_key else "http://localhost:8080/completion"
+    model_name = "gpt-4o" if api_key else "llama-3.1"
+
+    print(f"Using {api_type} API for augmentation")
+
+    train_subset = get_records_list(train_out_path)
+    test_subset = get_records_list(test_out_path)
+
+    # Create augmented examples for train set
+    print("\n=== Creating Augmented Examples for Train Set ===")
+    train_augmented = create_augmented_examples(
+        train_subset,
+        api_type=api_type,
+        api_url=api_url,
+        api_key=api_key,
+        model_name=model_name,
+        generic_rewrites_per_example=2,
+        sufficient_augmentations_per_example=2,
+        num_unrelated_examples=100,
+        seed=42,
+    )
+
+    # Write augmented train and test sets
+    # Combine original and augmented examples
+    train_combined = train_subset + train_augmented
+    add_jsonl_lines(train_augmented_out_path, train_combined)
+
+    # Create augmented examples for test set
+    print("\n=== Creating Augmented Examples for Test Set ===")
+    test_augmented = create_augmented_examples(
+        test_subset,
+        api_type=api_type,
+        api_url=api_url,
+        api_key=api_key,
+        model_name=model_name,
+        generic_rewrites_per_example=1,  # Fewer augmentations for test set
+        sufficient_augmentations_per_example=1,
+        num_unrelated_examples=10,
+        seed=43,  # Different seed for test set
+    )
+
+    # Combine original and augmented examples
+    test_combined = test_subset + test_augmented
+
+    # Write augmented test set
+    add_jsonl_lines(test_augmented_out_path, test_combined)
+
+    # print(f"\nFinal augmented train set: {len(train_combined)} examples")
+    print(f"Final augmented test set: {len(test_combined)} examples")
+
+    # Print augmentation statistics
+    train_augmented_types = {}
+    for rec in train_augmented:
+        aug_type = rec.get("augmentation_type", "unknown")
+        if aug_type not in train_augmented_types:
+            train_augmented_types[aug_type] = 0
+        train_augmented_types[aug_type] += 1
+
+    print("\nTrain set augmentation breakdown:")
+    for aug_type, count in train_augmented_types.items():
+        print(f"  {aug_type}: {count}")
