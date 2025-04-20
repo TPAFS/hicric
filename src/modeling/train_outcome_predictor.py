@@ -239,15 +239,22 @@ class TextClassificationWithMetadata(DistilBertForSequenceClassification):
             j_embeddings = self.jurisdiction_embeddings(jurisdiction_id)
             i_embeddings = self.insurance_type_embeddings(insurance_type_id)
 
-            if j_unspecified_mask.any():
-                avg_j_embedding = (self.jurisdiction_embeddings.weight[0] + self.jurisdiction_embeddings.weight[1]) / 2
-                j_embeddings[j_unspecified_mask] = avg_j_embedding
+            # Calculate average embeddings
+            avg_j_embedding = (self.jurisdiction_embeddings.weight[0] + self.jurisdiction_embeddings.weight[1]) / 2
+            avg_i_embedding = (self.insurance_type_embeddings.weight[0] + self.insurance_type_embeddings.weight[1]) / 2
 
-            if i_unspecified_mask.any():
-                avg_i_embedding = (
-                    self.insurance_type_embeddings.weight[0] + self.insurance_type_embeddings.weight[1]
-                ) / 2
-                i_embeddings[i_unspecified_mask] = avg_i_embedding
+            j_embeddings = torch.where(
+                j_unspecified_mask.unsqueeze(-1).expand_as(j_embeddings),
+                avg_j_embedding.expand_as(j_embeddings),
+                j_embeddings,
+            )
+
+            # This replaces: if i_unspecified_mask.any(): i_embeddings[i_unspecified_mask] = avg_i_embedding
+            i_embeddings = torch.where(
+                i_unspecified_mask.unsqueeze(-1).expand_as(i_embeddings),
+                avg_i_embedding.expand_as(i_embeddings),
+                i_embeddings,
+            )
 
             # For models without pooler_output, use the last hidden state's [CLS] token
             last_hidden_state = base_outputs.hidden_states[-1]
