@@ -6,7 +6,7 @@ from functools import partial
 import numpy as np
 import scipy
 import torch
-from datasets import Dataset, load_dataset
+from datasets import Dataset, DatasetDict, load_dataset
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
@@ -14,10 +14,12 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
+from sklearn.model_selection import train_test_split
 from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
     DataCollatorWithPadding,
+    DistilBertForSequenceClassification,
     Trainer,
     TrainingArguments,
 )
@@ -47,10 +49,21 @@ def load_and_split(
         recs = get_records_list(jsonl_path)
         recs = [{key: rec.get(key, "Unspecified") for key in filter_keys} for rec in recs]
         dataset = Dataset.from_list(recs)
+
     else:
         dataset = load_dataset("json", data_files=jsonl_path)["train"]
-    dataset = dataset.train_test_split(test_size=test_size, seed=1)
-    return dataset
+
+    # Use scikit-learn train_test_split for stratified sampling
+    train_indices, test_indices = train_test_split(
+        list(range(len(dataset))), test_size=test_size, random_state=seed, shuffle=True, stratify=dataset["decision"]
+    )
+
+    # Create train and test datasets using the indices
+    train_dataset = dataset.select(train_indices)
+    test_dataset = dataset.select(test_indices)
+
+    # Return as a DatasetDict
+    return DatasetDict({"train": train_dataset, "test": test_dataset})
 
 
 def tokenize_batch(examples, tokenizer):
@@ -119,7 +132,8 @@ def compute_metrics(eval_pred) -> dict:
 
 
 def compute_metrics2(eval_pred) -> dict:
-    predictions, labels = eval_pred
+    predictions = eval_pred.predictions[0]
+    labels = eval_pred.predictions[1]
 
     softmax_preds = scipy.special.softmax(predictions, axis=-1)
 
@@ -174,75 +188,86 @@ def compute_metrics2(eval_pred) -> dict:
     return best_metrics
 
 
-# Custom model class to handle the additional features
-class TextClassificationWithMetadata(AutoModelForSequenceClassification):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Add embeddings for jurisdiction and insurance type (2 categories each + unspecified)
-        # We'll use 0 and 1 for the specific categories, and handle unspecified (2) separately
+class TextClassificationWithMetadata(DistilBertForSequenceClassification):
+    def __init__(self, config):
+        super().__init__(config)
+        # Add embeddings for jurisdiction and insurance type
         self.jurisdiction_embeddings = torch.nn.Embedding(3, 16)
         self.insurance_type_embeddings = torch.nn.Embedding(3, 16)
 
-        # Initialize the unspecified embeddings to be the average of the others
+        # Initialize the unspecified embeddings to be zeros
         with torch.no_grad():
-            # Initialize the unspecified embedding (index 2) as zeros
-            # It will be dynamically computed during forward pass
             self.jurisdiction_embeddings.weight[2].fill_(0)
             self.insurance_type_embeddings.weight[2].fill_(0)
 
-        # Adjust the classifier to include these additional features
-        config = self.config
-        hidden_size = config.hidden_size
+        # Get the hidden size from the model's config
+        hidden_size = self.config.hidden_size
 
         # Create a new classifier with the additional features
-        self.classifier = torch.nn.Linear(hidden_size + 32, config.num_labels)
+        self.final_classifier = torch.nn.Linear(hidden_size + 32, config.num_labels)
 
-    def forward(self, input_ids=None, attention_mask=None, jurisdiction_id=None, insurance_type_id=None, **kwargs):
-        # Get the default output from parent
-        outputs = super().forward(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        jurisdiction_id=None,
+        insurance_type_id=None,
+        return_dict=True,
+        return_loss=True,
+        **kwargs,
+    ):
+        # Extract labels before passing to super().forward()
+        labels = kwargs.pop("labels", None)
 
-        # If we're not using the additional features, return the default outputs
+        # Get the embeddings and pooler output from the base model
+        base_outputs = super().forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            labels=None,  # Important: don't pass labels yet
+            # **kwargs  # Pass remaining kwargs
+        )
+
+        # If we're not using the additional features, use base model logits
         if jurisdiction_id is None or insurance_type_id is None:
-            return outputs
+            logits = base_outputs.logits
+        else:
+            # Process metadata features
+            j_unspecified_mask = jurisdiction_id == 2
+            i_unspecified_mask = insurance_type_id == 2
 
-        # Create masks for where the IDs are "Unspecified" (value 2)
-        j_unspecified_mask = jurisdiction_id == 2
-        i_unspecified_mask = insurance_type_id == 2
+            j_embeddings = self.jurisdiction_embeddings(jurisdiction_id)
+            i_embeddings = self.insurance_type_embeddings(insurance_type_id)
 
-        # Get embeddings for the additional features
-        j_embeddings = self.jurisdiction_embeddings(jurisdiction_id)
-        i_embeddings = self.insurance_type_embeddings(insurance_type_id)
+            if j_unspecified_mask.any():
+                avg_j_embedding = (self.jurisdiction_embeddings.weight[0] + self.jurisdiction_embeddings.weight[1]) / 2
+                j_embeddings[j_unspecified_mask] = avg_j_embedding
 
-        # For unspecified jurisdiction, use the average of NY and CA embeddings
-        if j_unspecified_mask.any():
-            # Calculate average of specific jurisdiction embeddings (indices 0 and 1)
-            avg_j_embedding = (self.jurisdiction_embeddings.weight[0] + self.jurisdiction_embeddings.weight[1]) / 2
+            if i_unspecified_mask.any():
+                avg_i_embedding = (
+                    self.insurance_type_embeddings.weight[0] + self.insurance_type_embeddings.weight[1]
+                ) / 2
+                i_embeddings[i_unspecified_mask] = avg_i_embedding
 
-            # Apply the average embedding where jurisdiction is unspecified
-            j_embeddings[j_unspecified_mask] = avg_j_embedding
+            # For models without pooler_output, use the last hidden state's [CLS] token
+            last_hidden_state = base_outputs.hidden_states[-1]
+            pooled_output = last_hidden_state[:, 0]
 
-        # For unspecified insurance_type, use the average of Commercial and Medicaid embeddings
-        if i_unspecified_mask.any():
-            # Calculate average of specific insurance_type embeddings (indices 0 and 1)
-            avg_i_embedding = (self.insurance_type_embeddings.weight[0] + self.insurance_type_embeddings.weight[1]) / 2
+            combined_features = torch.cat([pooled_output, j_embeddings, i_embeddings], dim=1)
+            logits = self.final_classifier(combined_features)
 
-            # Apply the average embedding where insurance_type is unspecified
-            i_embeddings[i_unspecified_mask] = avg_i_embedding
+        # Update the logits in the output
+        results = {"logits": logits}
 
-        # Concatenate with the pooled output
-        pooled_output = outputs.pooler_output
-        combined_features = torch.cat([pooled_output, j_embeddings, i_embeddings], dim=1)
+        if labels is not None:
+            loss_fct = torch.nn.CrossEntropyLoss()
+            loss = loss_fct(logits.view(-1, self.config.num_labels), labels.view(-1))
+            results["loss"] = loss
+            results["labels"] = labels
 
-        # Pass through the classifier
-        logits = self.classifier(combined_features)
-
-        # Replace the logits in the outputs
-        outputs.logits = logits
-
-        return outputs
+        return results
 
 
-# Custom collator to handle the additional features
 class DataCollatorWithMetadata(DataCollatorWithPadding):
     def __call__(self, features):
         batch = super().__call__(features)
@@ -308,7 +333,7 @@ def main(config_path: str) -> None:
     # Use our custom data collator that handles the additional features
     data_collator = DataCollatorWithMetadata(tokenizer=tokenizer)
 
-    # Load the base model
+    # Load the base model to determine its class
     base_model = AutoModelForSequenceClassification.from_pretrained(
         pretrained_model_key,
         num_labels=3,
@@ -316,16 +341,13 @@ def main(config_path: str) -> None:
         label2id=LABEL2ID,
     )
 
-    # Create our custom model
+    # Now instantiate your custom model correctly
     model = TextClassificationWithMetadata.from_pretrained(
         pretrained_model_key,
         num_labels=3,
         id2label=ID2LABEL,
         label2id=LABEL2ID,
     )
-
-    # Copy weights from base model to our custom model
-    model.load_state_dict(base_model.state_dict(), strict=False)
 
     # Handle annoyance with HF / pretrained legalbert bug/user error
     # HF trainer complains of param data not being contiguous when loading checkpoints
@@ -336,13 +358,14 @@ def main(config_path: str) -> None:
     checkpoints_dir = os.path.join(OUTPUT_DIR, dataset_name, outdir_name)
     training_args = TrainingArguments(
         output_dir=checkpoints_dir,
+        run_name=cfg["wandb_run_tag"],
         learning_rate=cfg["learning_rate"],
         per_device_train_batch_size=cfg["batch_size"],
         per_device_eval_batch_size=cfg["batch_size"],
         num_train_epochs=cfg["num_epochs"],
         weight_decay=cfg["weight_decay"],
         fp16=(cfg["dtype"] == "float16"),
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=1,
         load_best_model_at_end=True,
@@ -357,7 +380,7 @@ def main(config_path: str) -> None:
         args=training_args,
         train_dataset=dataset["train"],
         eval_dataset=dataset["test"],
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics2,
     )
