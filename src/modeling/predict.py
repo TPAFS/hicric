@@ -16,6 +16,8 @@ from src.modeling.util import export_onnx_model, quantize_onnx_model
 init()
 
 MODEL_DIR = "./models/overturn_predictor"
+ID2LABEL = {0: "Insufficient", 1: "Upheld", 2: "Overturned"}
+LABEL2ID = {v: k for k, v in ID2LABEL.items()}
 
 # Test examples with expected classifications
 TEST_EXAMPLES = [
@@ -38,6 +40,30 @@ TEST_EXAMPLES = [
     {"text": "hello? is this relevant?", "expected": "Insufficient"},
     {
         "text": "A patient is being denied wegovy for morbid obesity. The health plan states it is not medically necessary.",
+        "expected": "Overturned",
+    },
+    {
+        "text": "This patient has extensive and inoperable carcinoma of the stomach. He was started on chemotherapy with Xeloda and Oxaliplatin, because he has less nausea with Oxaliplatin than with the alternative, Cisplatin. Oxaliplatin was denied as experimental for treatment of his gastric cancer.",
+        "expected": "Overturned",
+    },
+    {
+        "text": "This is a patient who was denied breast tomosynthesis to screen for breast cancer.",
+        "expected": "Overturned",
+    },
+    {
+        "text": "This is a patient with Crohn's Disease who is being treated with Humira. Their health plan has denied Anser ADA blood level testing for Humira, claiming it is investigational.",
+        "expected": "Upheld",
+    },
+    {
+        "text": "The patient is a 44-year-old female who initially presented with an abnormal screening mammogram. The patient was seen by a radiation oncologist who recommended treatment of the right chest wall and comprehensive nodal regions using proton beam radiation therapy.",
+        "expected": "Upheld",
+    },
+    {
+        "text": "The patient is a 10-year-old female with a history of Pitt-Hopkins syndrome and associated motor planning difficulties, possible weakness in the oral area, and receptive and expressive language delays. The provider has recommended that the patient continue to receive individual speech and language therapy sessions twice a week for 60-minute sessions. The Health Insurer has denied the requested services as not medically necessary for treatment of the patient’s medical condition.",
+        "expected": "Overturned",
+    },
+    {
+        "text": "The patient is a nine-year-old female with a history of autism spectrum disorder and a speech delay. The patient’s parent has requested reimbursement for the ABA services provided over the course of a year. The Health Insurer has denied the services at issue as not medically necessary for the treatment of the patient.",
         "expected": "Overturned",
     },
 ]
@@ -160,11 +186,13 @@ def test_all_examples(model, model_int8, onnx_session, onnx_quant_session, token
         expected = example["expected"]
 
         # Print a shortened version of the text
-        print(f"\n{Fore.YELLOW}{Style.BRIGHT}Example {i+1}: '{text[:250]}...' (Expected: {expected}){Style.RESET_ALL}")
+        print(
+            f"\n{Fore.YELLOW}{Style.BRIGHT}Example {i + 1}: '{text[:250]}...' (Expected: {expected}){Style.RESET_ALL}"
+        )
 
         # Run through all model variants
         pt_result = run_pytorch_model(model, tokenizer, text)
-        pt_no_metadata_result = run_pytorch_model_no_metadata(model, tokenizer, text)
+        # pt_no_metadata_result = run_pytorch_model_no_metadata(model, tokenizer, text)
         pt_quant_result = run_pytorch_quantized(model_int8, tokenizer, text)
 
         onnx_result = run_onnx(onnx_session, tokenizer, text)
@@ -172,7 +200,7 @@ def test_all_examples(model, model_int8, onnx_session, onnx_quant_session, token
 
         # Print results
         print_result("PyTorch (with metadata)", pt_result, expected)
-        print_result("PyTorch (no metadata)", pt_no_metadata_result, expected)
+        # print_result("PyTorch (no metadata)", pt_no_metadata_result, expected)
         print_result("PyTorch (quantized)", pt_quant_result, expected)
         print_result("ONNX", onnx_result, expected)
         print_result("ONNX (quantized)", onnx_quant_result, expected)
@@ -205,18 +233,13 @@ def process_single_prompt(model, model_int8, onnx_session, onnx_quant_session, t
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Medical Classification Model Inference")
+    parser = argparse.ArgumentParser(description="Appeal Classification Model Inference")
     parser.add_argument("--test", action="store_true", help="Run all test examples")
     parser.add_argument("--prompt", type=str, help="Text to classify")
     args = parser.parse_args()
 
     if not args.test and not args.prompt:
         parser.error("Either --test or --prompt must be specified")
-
-    # Model labels
-    global ID2LABEL, LABEL2ID
-    ID2LABEL = {0: "Insufficient", 1: "Upheld", 2: "Overturned"}
-    LABEL2ID = {v: k for k, v in ID2LABEL.items()}
 
     # Load model and tokenizer
     dataset_name = "train_backgrounds_suff_augmented"
@@ -228,7 +251,7 @@ def main():
     print(f"{Fore.CYAN}Loading models...{Style.RESET_ALL}")
 
     # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(ckpt_path, model_max_length=512)
+    tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
 
     # Load PyTorch model
     model = TextClassificationWithMetadata.from_pretrained(
