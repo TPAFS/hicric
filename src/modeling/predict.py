@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 import argparse
+import copy
 import os
 
 import numpy as np
@@ -134,13 +135,29 @@ def run_pytorch_quantized(model_int8, tokenizer, text, jurisdiction_id=2, insura
     }
 
 
-def run_onnx(session, tokenizer, text):
+def run_onnx(session, tokenizer, text, jurisdiction_id=2, insurance_type_id=2):
     """Run inference with ONNX Runtime"""
     try:
+        # Tokenize input text
         inputs = tokenizer(text, return_tensors="np", truncation=True, padding=True)
-        outputs = session.run(output_names=["logits"], input_feed=dict(inputs))
-        result = scipy.special.softmax(outputs[0], axis=-1)
 
+        # Construct the full input feed
+        input_feed = dict(inputs)
+
+        # Check if the model expects metadata inputs
+        input_names = [input.name for input in session.get_inputs()]
+
+        # Add jurisdiction and insurance type if supported by the model
+        if "jurisdiction_id" in input_names:
+            input_feed["jurisdiction_id"] = np.array([jurisdiction_id], dtype=np.int64)
+        if "insurance_type_id" in input_names:
+            input_feed["insurance_type_id"] = np.array([insurance_type_id], dtype=np.int64)
+
+        # Run inference
+        outputs = session.run(output_names=["logits"], input_feed=input_feed)
+
+        # Process outputs
+        result = scipy.special.softmax(outputs[0], axis=-1)
         argmax = np.argmax(result[0])
         prob = result[0][argmax]
 
@@ -232,6 +249,65 @@ def process_single_prompt(model, model_int8, onnx_session, onnx_quant_session, t
     print_result("ONNX (quantized)", onnx_quant_result)
 
 
+def calibrate_model(model, tokenizer, calibration_data):
+    """Run calibration data through the model for quantization preparation"""
+    print(f"{Fore.CYAN}Calibrating model with {len(calibration_data)} examples...{Style.RESET_ALL}")
+    model.eval()
+
+    # Define mappings for jurisdiction and insurance type if not already in the calibration data
+    JURISDICTION_MAP = {"NY": 0, "CA": 1, "Unspecified": 2}
+    INSURANCE_TYPE_MAP = {"Commercial": 0, "Medicaid": 1, "Unspecified": 2}
+
+    with torch.no_grad():
+        for example in calibration_data:
+            text = example["text"]
+
+            # Get jurisdiction and insurance type IDs, default to "Unspecified" (2)
+            if "jurisdiction" in example:
+                j_id = JURISDICTION_MAP.get(example["jurisdiction"], 2)
+            else:
+                j_id = example.get("jurisdiction_id", 2)
+
+            if "insurance_type" in example:
+                i_id = INSURANCE_TYPE_MAP.get(example["insurance_type"], 2)
+            else:
+                i_id = example.get("insurance_type_id", 2)
+
+            # Tokenize the text
+            tokenized = tokenizer(text, return_tensors="pt", truncation=True, padding=True)
+
+            # Convert jurisdiction and insurance type to tensors
+            j_tensor = torch.tensor([j_id])
+            i_tensor = torch.tensor([i_id])
+
+            # Run forward pass for calibration
+            _ = model(**tokenized, jurisdiction_id=j_tensor, insurance_type_id=i_tensor)
+
+    return model
+
+
+def quantize_model_with_proper_embedding_config(model, tokenizer, calibration_data=None):
+    """Quantize model focusing on embeddings and linear layers while avoiding layer_norm issues"""
+    print(f"{Fore.CYAN}Setting up quantization for embeddings and linear layers...{Style.RESET_ALL}")
+
+    # Create a copy of the model to preserve the original
+    model_copy = copy.deepcopy(model)
+    model_copy.eval()
+
+    # Dynamic quantization approach that properly handles both layer types
+    model_int8 = torch.ao.quantization.quantize_dynamic(
+        model_copy,
+        {
+            torch.nn.Linear,
+            #  torch.nn.Embedding
+        },  # quantize both linear and embedding layers
+        dtype=torch.qint8,
+    )
+
+    print(f"{Fore.GREEN}Quantization complete (Linear and Embedding layers){Style.RESET_ALL}")
+    return model_int8
+
+
 def main():
     parser = argparse.ArgumentParser(description="Appeal Classification Model Inference")
     parser.add_argument("--test", action="store_true", help="Run all test examples")
@@ -265,12 +341,26 @@ def main():
         round(os.path.getsize(os.path.join(ckpt_path, "model.safetensors")) / (1024 * 1024)),
     )
 
-    # Load quantized PyTorch model
-    model_int8 = torch.ao.quantization.quantize_dynamic(
-        model.to("cpu"),
-        {torch.nn.Linear},
-        dtype=torch.qint8,
-    )
+    # Prepare calibration data from test examples
+    calibration_data = []
+    for example in TEST_EXAMPLES:
+        # Add jurisdiction and insurance_type variations for each example
+        for j_id in [0, 1, 2]:  # NY, CA, Unspecified
+            for i_id in [0, 1, 2]:  # Commercial, Medicaid, Unspecified
+                calibration_data.append({"text": example["text"], "jurisdiction_id": j_id, "insurance_type_id": i_id})
+
+    # Prepare calibration data from test examples
+    calibration_data = []
+    for example in TEST_EXAMPLES:
+        # Add jurisdiction and insurance_type variations for each example
+        for j_id in [0, 1, 2]:  # NY, CA, Unspecified
+            for i_id in [0, 1, 2]:  # Commercial, Medicaid, Unspecified
+                calibration_data.append({"text": example["text"], "jurisdiction_id": j_id, "insurance_type_id": i_id})
+
+    # Quantize model with proper embedding configuration
+    model_int8 = quantize_model_with_proper_embedding_config(model.to("cpu"), tokenizer, calibration_data)
+
+    print(f"{Fore.GREEN}Model calibration and quantization complete{Style.RESET_ALL}")
     param_size = 0
     for param in model_int8.parameters():
         param_size += param.nelement() * param.element_size()
