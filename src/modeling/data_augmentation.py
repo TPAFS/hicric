@@ -280,8 +280,8 @@ def generate_unrelated_content(
 def augment_sufficient_examples(
     dataset: Dataset,
     num_augmentations_per_example: int = 1,
-    api_type: str = "llamacpp",  # "openai" or "llamacpp"
-    api_url: str = "http://localhost:8080/completion",
+    api_type: str = "openai",  # "openai" or "llamacpp"
+    api_url: str = "https://api.openai.com/v1/chat/completions",
     api_key: str | None = None,
     model_name: str = "localllama",
     seed: int = 42,

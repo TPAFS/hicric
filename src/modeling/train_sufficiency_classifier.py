@@ -223,21 +223,12 @@ def main(config_path: str) -> None:
     elif use_data_augmentation:
         generic_rewrite_params = cfg.get(
             "generic_rewrite_params",
-            {"num_augmentations_per_example": 1, "seed": 1, "api_key": os.environ.get("OPENAI_API_KEY")},
         )
-        unrelated_params = cfg.get(
-            "unrelated_params", {"num_examples": 500, "seed": 1, "api_key": os.environ.get("OPENAI_API_KEY")}
-        )
-        sufficient_augmentation_params = cfg.get(
-            "sufficient_augmentation_params",
-            {
-                "num_augmentations_per_example": 1,
-                "api_type": "llamacpp",
-                "model_name": "Meta-Llama-3-8B-Instruct.Q4_K_M.gguf",
-                "seed": 1,
-                "api_key": os.environ.get("OPENAI_API_KEY"),
-            },
-        )
+        generic_rewrite_params["api_key"] = os.environ.get("OPENAI_API_KEY")
+        unrelated_params = cfg.get("unrelated_params")
+        unrelated_params["api_key"] = os.environ.get("OPENAI_API_KEY")
+        sufficient_augmentation_params = cfg.get("sufficient_augmentation_params")
+        sufficient_augmentation_params["api_key"] = os.environ.get("OPENAI_API_KEY")
 
         # Set output paths based on save_augmentations flag
         output_train_path = augmented_train_path if save_augmentations else None
