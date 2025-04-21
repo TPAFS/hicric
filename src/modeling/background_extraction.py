@@ -685,9 +685,10 @@ if __name__ == "__main__":
         api_url=api_url,
         api_key=api_key,
         model_name=model_name,
-        generic_rewrites_per_example=2,
-        sufficient_augmentations_per_example=2,
-        num_unrelated_examples=100,
+        generic_rewrites_per_example=1,
+        sufficient_augmentations_per_example=1,
+        num_unrelated_examples=1000,
+        api_call_limit=6000,
         seed=42,
     )
 
@@ -706,7 +707,8 @@ if __name__ == "__main__":
         model_name=model_name,
         generic_rewrites_per_example=1,  # Fewer augmentations for test set
         sufficient_augmentations_per_example=1,
-        num_unrelated_examples=10,
+        num_unrelated_examples=1000,
+        api_call_limit=6000,
         seed=43,  # Different seed for test set
     )
 
