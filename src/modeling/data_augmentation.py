@@ -85,7 +85,7 @@ Rewrite the text to be insufficient for evaluation by removing key details or ma
                             {"role": "user", "content": prompt},
                         ],
                         "max_tokens": 500,
-                        "temperature": 0.7,
+                        "temperature": 1.2,
                     }
                 else:  # llama
                     request_data = {"prompt": f"{system_instruction}\n\n{prompt}", "temperature": 0.7, "stream": False}
@@ -187,7 +187,7 @@ def generate_unrelated_content(
         "Make a general statement about insurance denials",
         "Make a statement about insurance denials for a particular type of care, but that does not describe a specific situation.",
         "Write some generic unrelated user input (hello, how are you, etc.). Nothing inappropriate.",
-        "Write some gibberish that might be input accidentally by a user, or sent inadverdently, cut off sentences, etc.",
+        "Write some gibberish that might be input accidentally by a user, or sent inadvertently, cut off sentences, etc.",
     ]
 
     # Calculate how many examples to generate per category
@@ -219,12 +219,12 @@ def generate_unrelated_content(
                             {"role": "user", "content": category},
                         ],
                         "max_tokens": 100,
-                        "temperature": 0.8,
+                        "temperature": 1.2,
                     }
                 else:  # LLaMa.cpp
                     request_data = {
                         "prompt": f"{system_instruction}\n\n{category}",
-                        "temperature": 0.8,
+                        "temperature": 1.2,
                         "max_tokens": 100,
                         "stream": False,
                     }
@@ -243,8 +243,8 @@ def generate_unrelated_content(
                             new_text = response_json["content"].strip()
 
                     # Clean up and limit length
-                    if len(new_text) > 200:
-                        new_text = new_text[:200]
+                    if len(new_text) > 512:
+                        new_text = new_text[:512]
 
                     # Add the example with metadata
                     all_generations.append(
@@ -331,7 +331,7 @@ def augment_sufficient_examples(
     )
     clinical_prompt = "Rewrite the following description using more clinical and technical medical terminology, maintaining all the key details. {}"
     paraphrase_prompt = "Rewrite the following description in different words while preserving the exact same meaning and all key details. Make minimal changes: {}"
-    details_prompt = "Rewrite the following description, adding a few more specific details about the condition and treatment, while preserving the core information. Make minimal changes: {}"
+    details_prompt = "Rewrite the following description, adding a few more specific details about the condition and treatment, but removing none. Make minimal changes: {}"
 
     # System instruction for models
     system_instruction = "You are a helpful assistant that rewrites healthcare denial descriptions while preserving their key information."
@@ -353,21 +353,17 @@ def augment_sufficient_examples(
                     continue
 
                 # Delete 1-3 random words (but not too many)
-                num_to_delete = min(random.randint(1, 3), len(words) // 5)
+                num_to_delete = 1
                 indices_to_delete = random.sample(range(len(words)), num_to_delete)
 
                 new_text = " ".join([w for i, w in enumerate(words) if i not in indices_to_delete])
-
-                # Slightly reduce sufficiency score but keep it sufficient (>= 3)
-                new_score = max(3, sufficiency_score - 1) if random.random() < 0.3 else sufficiency_score
 
                 # Add the augmented example with metadata
                 augmented_examples.append(
                     {
                         "text": new_text,
-                        "sufficiency_score": new_score,
+                        "sufficiency_score": sufficiency_score,
                         "source_text": text,
-                        "source_score": sufficiency_score,
                         "augmentation_type": "sufficient_word_deletion",
                     }
                 )
@@ -398,13 +394,13 @@ def augment_sufficient_examples(
                                 {"role": "user", "content": prompt},
                             ],
                             "max_tokens": 500,
-                            "temperature": 0.7,
+                            "temperature": 1.2,
                         }
                     else:  # LLaMa.cpp
                         # LLaMa.cpp format (depends on your server implementation)
                         request_data = {
                             "prompt": f"{system_instruction}\n\n{prompt}",
-                            "temperature": 0.7,
+                            "temperature": 1.2,
                             "max_tokens": 500,
                             "stop": ["\n\n", "###"],  # Common stop sequences
                             "stream": False,
@@ -543,7 +539,7 @@ def process_and_save_augmentations(
     train_records = [dataset_records[i] for i in train_indices]
     test_records = [dataset_records[i] for i in test_indices]
 
-    # Apply augmentations only to training data only
+    # Apply augmentations to training data only
     train_dataset = Dataset.from_list(train_records)
     test_dataset = Dataset.from_list(test_records)
     augmented_train_records = []

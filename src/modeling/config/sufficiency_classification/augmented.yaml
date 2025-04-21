@@ -23,3 +23,10 @@ sufficient_augmentation_params:
   api_type: openai
   api_url: https://api.openai.com/v1/chat/completions
   model_name: gpt-4o
+  num_augmentations_per_example: 2
+
+generic_rewrite_params:
+  num_augmentations_per_example: 2
+
+unrelated_params:
+  num_examples: 500
