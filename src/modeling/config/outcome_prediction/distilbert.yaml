@@ -19,6 +19,6 @@ dtype: "float16"  # 'float32','float16' for training dtype
 compile: True # Whether to use torch compile
 
 # Test eval settings
-test_data_path: "./data/outcomes/test_backgrounds_suff_augmented.jsonl"
-checkpoint_name: "checkpoint-19152"
-eval_threshold: .35
+test_data_path: "./data/outcomes/test_backgrounds_suff.jsonl"
+checkpoint_name: "checkpoint-23040"
+eval_threshold: .5
