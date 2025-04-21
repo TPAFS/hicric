@@ -84,8 +84,6 @@ def quantize_onnx_model(onnx_model_path: str, quantized_model_path: str):
         onnx_model_path,
         quantized_model_path,
         weight_type=QuantType.QInt8,
-        # Optionally exclude problematic operators
-        op_types_to_quantize=["MatMul", "Gemm", "Conv"],
     )
     print(f"Quantized model saved to: {quantized_model_path}")
     return None
