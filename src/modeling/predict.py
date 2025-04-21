@@ -83,12 +83,12 @@ def run_pytorch_model(model, tokenizer, text, jurisdiction_id=2, insurance_type_
 
     probs = torch.softmax(result["logits"], dim=-1)
     prob, argmax = torch.max(probs, dim=-1)
-
     return {
         "class_id": argmax.item(),
         "class_name": ID2LABEL[argmax.item()],
         "confidence": prob.item(),
         "probs": probs[0].tolist(),
+        "logits": result["logits"][0].tolist(),
     }
 
 
@@ -108,6 +108,7 @@ def run_pytorch_model_no_metadata(model, tokenizer, text):
                 "class_name": ID2LABEL[argmax.item()],
                 "confidence": prob.item(),
                 "probs": probs[0].tolist(),
+                "logits": result["logits"][0].tolist(),
             }
         except Exception as e:
             return {"error": str(e), "class_name": "ERROR", "confidence": 0.0, "probs": [0.0, 0.0, 0.0]}
@@ -132,6 +133,7 @@ def run_pytorch_quantized(model_int8, tokenizer, text, jurisdiction_id=2, insura
         "class_name": ID2LABEL[argmax.item()],
         "confidence": prob.item(),
         "probs": probs[0].tolist(),
+        "logits": result["logits"][0].tolist(),
     }
 
 
@@ -160,18 +162,18 @@ def run_onnx(session, tokenizer, text, jurisdiction_id=2, insurance_type_id=2):
         result = scipy.special.softmax(outputs[0], axis=-1)
         argmax = np.argmax(result[0])
         prob = result[0][argmax]
-
         return {
             "class_id": int(argmax),
             "class_name": ID2LABEL[int(argmax)],
             "confidence": float(prob),
             "probs": result[0].tolist(),
+            "logits": outputs[0][0],
         }
     except Exception as e:
         return {"error": str(e), "class_name": "ERROR", "confidence": 0.0, "probs": [0.0, 0.0, 0.0]}
 
 
-def print_result(model_name, result, expected=None, show_probs=False):
+def print_result(model_name, result, expected=None, show_probs=True, show_logits=True):
     """Print inference result with color-coding based on matching expected output"""
     if "error" in result:
         print(f"{model_name}: {Fore.RED}ERROR{Style.RESET_ALL} - {result['error']}")
@@ -187,6 +189,11 @@ def print_result(model_name, result, expected=None, show_probs=False):
 
     # Print result
     print(f"{model_name}: {color}{result['class_name']}{Style.RESET_ALL} ({result['confidence']:.4f})")
+
+    # Optionally show logits
+    if show_logits:
+        logits_str = ", ".join([f"{ID2LABEL[i]}: {p:.4f}" for i, p in enumerate(result["logits"])])
+        print(f"  Logits: {logits_str}")
 
     # Optionally show probabilities
     if show_probs:
@@ -221,10 +228,6 @@ def test_all_examples(model, model_int8, onnx_session, onnx_quant_session, token
         print_result("PyTorch (quantized)", pt_quant_result, expected)
         print_result("ONNX", onnx_result, expected)
         print_result("ONNX (quantized)", onnx_quant_result, expected)
-
-        # Print probabilities from PyTorch model
-        probs_str = ", ".join([f"{ID2LABEL[i]}: {p:.4f}" for i, p in enumerate(pt_result["probs"])])
-        print(f"Probabilities: {probs_str}")
 
         print("-" * 80)
 
