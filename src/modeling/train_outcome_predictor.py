@@ -18,6 +18,7 @@ from sklearn.model_selection import train_test_split
 from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
+    BertForSequenceClassification,
     DataCollatorWithPadding,
     DistilBertForSequenceClassification,
     Trainer,
@@ -188,22 +189,16 @@ def compute_metrics2(eval_pred) -> dict:
     return best_metrics
 
 
-class TextClassificationWithMetadata(DistilBertForSequenceClassification):
+class TextClassificationWithMetadata(BertForSequenceClassification):
     def __init__(self, config):
         super().__init__(config)
-        # Add embeddings for jurisdiction and insurance type
-        self.jurisdiction_embeddings = torch.nn.Embedding(3, 16)
-        self.insurance_type_embeddings = torch.nn.Embedding(3, 16)
+        # Only create embeddings for the actual classes (NY, CA) and (Commercial, Medicaid)
+        # The metadata is optional, and unspecified inputs get the average embeddings
+        self.jurisdiction_embeddings = torch.nn.Embedding(2, 16)
+        self.insurance_type_embeddings = torch.nn.Embedding(2, 16)
 
-        # Initialize the unspecified embeddings to be zeros
-        with torch.no_grad():
-            self.jurisdiction_embeddings.weight[2].fill_(0)
-            self.insurance_type_embeddings.weight[2].fill_(0)
-
-        # Get the hidden size from the model's config
         hidden_size = self.config.hidden_size
 
-        # Create a new classifier with the additional features
         self.final_classifier = torch.nn.Linear(hidden_size + 32, config.num_labels)
 
     def forward(
@@ -216,52 +211,51 @@ class TextClassificationWithMetadata(DistilBertForSequenceClassification):
         return_loss=True,
         **kwargs,
     ):
-        # Extract labels before passing to super().forward()
         labels = kwargs.pop("labels", None)
 
-        # Get the embeddings and pooler output from the base model
         base_outputs = super().forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
             output_hidden_states=True,
-            labels=None,  # Important: don't pass labels yet
-            # **kwargs  # Pass remaining kwargs
+            labels=None,  # Don't pass labels yet
         )
 
-        # If we're not using the additional features, use base model logits
-        if jurisdiction_id is None or insurance_type_id is None:
-            logits = base_outputs.logits
-        else:
-            # Process metadata features
-            j_unspecified_mask = jurisdiction_id == 2
-            i_unspecified_mask = insurance_type_id == 2
+        # Get the last hidden state's [CLS] token
+        last_hidden_state = base_outputs.hidden_states[-1]
+        pooled_output = last_hidden_state[:, 0]
 
-            j_embeddings = self.jurisdiction_embeddings(jurisdiction_id)
-            i_embeddings = self.insurance_type_embeddings(insurance_type_id)
+        # Create masks for unspecified values (which will get assigned idx n for n specified classes)
+        j_unspecified_mask = jurisdiction_id == 2
+        i_unspecified_mask = insurance_type_id == 2
 
-            # Calculate average embeddings
-            avg_j_embedding = (self.jurisdiction_embeddings.weight[0] + self.jurisdiction_embeddings.weight[1]) / 2
-            avg_i_embedding = (self.insurance_type_embeddings.weight[0] + self.insurance_type_embeddings.weight[1]) / 2
+        # Convert invalid embedding indices to last embedding indices, temporarily
+        j_ids_valid = torch.clamp(jurisdiction_id, 0, 1)
+        i_ids_valid = torch.clamp(insurance_type_id, 0, 1)
 
-            j_embeddings = torch.where(
-                j_unspecified_mask.unsqueeze(-1).expand_as(j_embeddings),
-                avg_j_embedding.expand_as(j_embeddings),
-                j_embeddings,
-            )
+        # Get actual embeddings (and embeddings for temp values)
+        j_embeddings = self.jurisdiction_embeddings(j_ids_valid)
+        i_embeddings = self.insurance_type_embeddings(i_ids_valid)
 
-            # This replaces: if i_unspecified_mask.any(): i_embeddings[i_unspecified_mask] = avg_i_embedding
-            i_embeddings = torch.where(
-                i_unspecified_mask.unsqueeze(-1).expand_as(i_embeddings),
-                avg_i_embedding.expand_as(i_embeddings),
-                i_embeddings,
-            )
+        # Calculate average embeddings for each metadata type
+        avg_j_embedding = (self.jurisdiction_embeddings.weight[0] + self.jurisdiction_embeddings.weight[1]) / 2
+        avg_i_embedding = (self.insurance_type_embeddings.weight[0] + self.insurance_type_embeddings.weight[1]) / 2
 
-            # For models without pooler_output, use the last hidden state's [CLS] token
-            last_hidden_state = base_outputs.hidden_states[-1]
-            pooled_output = last_hidden_state[:, 0]
+        # Replace unspecified temp embedding values with averages
+        j_embeddings = torch.where(
+            j_unspecified_mask.unsqueeze(-1).expand_as(j_embeddings),
+            avg_j_embedding.expand_as(j_embeddings),
+            j_embeddings,
+        )
 
-            combined_features = torch.cat([pooled_output, j_embeddings, i_embeddings], dim=1)
-            logits = self.final_classifier(combined_features)
+        i_embeddings = torch.where(
+            i_unspecified_mask.unsqueeze(-1).expand_as(i_embeddings),
+            avg_i_embedding.expand_as(i_embeddings),
+            i_embeddings,
+        )
+
+        # Combine features and get logits
+        combined_features = torch.cat([pooled_output, j_embeddings, i_embeddings], dim=1)
+        logits = self.final_classifier(combined_features)
 
         # Update the logits in the output
         results = {"logits": logits}
@@ -339,14 +333,6 @@ def main(config_path: str) -> None:
 
     # Use our custom data collator that handles the additional features
     data_collator = DataCollatorWithMetadata(tokenizer=tokenizer)
-
-    # Load the base model to determine its class
-    base_model = AutoModelForSequenceClassification.from_pretrained(
-        pretrained_model_key,
-        num_labels=3,
-        id2label=ID2LABEL,
-        label2id=LABEL2ID,
-    )
 
     # Now instantiate your custom model correctly
     model = TextClassificationWithMetadata.from_pretrained(
