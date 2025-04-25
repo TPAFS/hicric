@@ -150,6 +150,20 @@ def is_metadata_model(model):
     return has_j_embeddings and has_i_embeddings and accepts_metadata
 
 
+def count_parameters(model):
+    """Count the number of trainable parameters in the model and calculate size in MB"""
+    param_count = 0
+    size_in_bytes = 0
+
+    for p in model.parameters():
+        if p.requires_grad:
+            param_count += p.numel()
+            size_in_bytes += p.numel() * p.element_size()
+
+    size_in_mb = size_in_bytes / (1024 * 1024)
+    return param_count, size_in_mb
+
+
 def main(config_path: str):
     cfg = load_config(config_path)
 
@@ -184,6 +198,10 @@ def main(config_path: str):
         id2label=ID2LABEL,
         label2id=LABEL2ID,
     )
+
+    # Count model parameters
+    param_count, size_in_mb = count_parameters(model)
+    print(f"Model size: {param_count:,} parameters ({size_in_mb:.2f} MB)")
 
     # Check if model supports metadata
     supports_metadata = is_metadata_model(model)
@@ -226,25 +244,79 @@ def main(config_path: str):
             all_logits.append(outputs["logits"].cpu())
 
         predictions = torch.cat(all_logits)
+
+        # Now create predictions with unspecified metadata for all examples
+        print("Computing metrics with unspecified metadata for all examples...")
+        unspecified_j_ids = torch.full((len(text_records),), JURISDICTION_MAP["Unspecified"], dtype=torch.long)
+        unspecified_i_ids = torch.full((len(text_records),), INSURANCE_TYPE_MAP["Unspecified"], dtype=torch.long)
+
+        all_unspecified_logits = []
+
+        for i in range(0, len(text_records), batch_size):
+            end_idx = min(i + batch_size, len(text_records))
+            batch_texts = text_records[i:end_idx]
+            batch_j_ids = unspecified_j_ids[i:end_idx].to(device)
+            batch_i_ids = unspecified_i_ids[i:end_idx].to(device)
+
+            inputs = tokenizer(batch_texts, truncation=True, padding=True, return_tensors="pt").to(device)
+
+            with torch.no_grad():
+                outputs = model(**inputs, jurisdiction_id=batch_j_ids, insurance_type_id=batch_i_ids)
+
+            all_unspecified_logits.append(outputs["logits"].cpu())
+
+        unspecified_predictions = torch.cat(all_unspecified_logits)
     else:
         # For standard models, use the original pipeline
         pipeline = ClassificationPipeline(model=model, tokenizer=tokenizer, device=device, truncation=True)
         predictions = torch.cat(pipeline(text_records, batch_size=100))
+        # No metadata to ignore for standard models, so unspecified predictions are the same
+        unspecified_predictions = predictions
 
-    # Compute metrics
+    # Compute standard metrics
+    metrics = compute_metrics(predictions, labels)
+    metrics["param_count"] = param_count
+    metrics["model_size_mb"] = size_in_mb
+
+    # Add model size to metrics
+    metrics["param_count"] = param_count
+
+    # Compute metrics with unspecified metadata
+    unspecified_metrics = compute_metrics(unspecified_predictions, labels)
+    # Add model size to unspecified metrics
+    unspecified_metrics["param_count"] = param_count
+
+    # Compute threshold metrics if specified
     if threshold is not None:
         threshold_metrics = compute_metrics_w_threshold(predictions, labels, threshold)
+        threshold_metrics["param_count"] = param_count
+        threshold_metrics["model_size_mb"] = size_in_mb
 
-    metrics = compute_metrics(predictions, labels)
+        unspecified_threshold_metrics = compute_metrics_w_threshold(unspecified_predictions, labels, threshold)
+        unspecified_threshold_metrics["param_count"] = param_count
+        unspecified_threshold_metrics["model_size_mb"] = size_in_mb
 
     # Print and write metrics
+    print("Standard metrics:")
     print(metrics)
     with open(os.path.join(ckpt_path, "test_metrics.json"), "w") as f:
         json.dump(metrics, f)
+
+    print("\nMetrics with unspecified metadata:")
+    print(unspecified_metrics)
+    with open(os.path.join(ckpt_path, "test_metrics_unspecified.json"), "w") as f:
+        json.dump(unspecified_metrics, f)
+
     if threshold is not None:
+        print("\nStandard threshold metrics:")
         print(threshold_metrics)
         with open(os.path.join(ckpt_path, "test_metrics_w_threshold.json"), "w") as f:
             json.dump(threshold_metrics, f)
+
+        print("\nThreshold metrics with unspecified metadata:")
+        print(unspecified_threshold_metrics)
+        with open(os.path.join(ckpt_path, "test_metrics_w_threshold_unspecified.json"), "w") as f:
+            json.dump(unspecified_threshold_metrics, f)
 
     return None
 
