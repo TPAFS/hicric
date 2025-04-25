@@ -1,3 +1,5 @@
+import argparse
+import json
 import os
 import time
 
@@ -11,11 +13,11 @@ OUTCOMES_DATASET = "test_backgrounds_suff"
 MODEL_KEY = "gpt-4o-mini-2024-07-18"
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", None)
 SYSTEM_MESSAGE = """You are an expert in U.S. health law and health policy, as well as a medical expert. In what follows, I will provide a description of a case in which a patient has submitted an appeal of a decision by their health insurer to deny a claim submitted on their behalf. You must predict whether an independent reviewer will overturn the denial, or uphold the denial when reviewing the appeal. If they would overturn it, your decision would be "Overturned". If they would not, your decision would be "Upheld". If there is insufficient information in the context to predict this, and it could go either way depending on more details, your decision would be "Insufficient".
-Very short cases are often insufficient, as are cases which describe a treatment or service without saying what it is for. Sufficiency does not mean sufficient-without-a-doubt, it just means sufficient to make a good estimated guess about which
-way the review will go. Most cases I present to you will have sufficient information, by my subjective standards.
+
+Very short cases are often insufficient, as are cases which describe a treatment or service without saying what it is for. Sufficiency does not mean sufficient-without-a-doubt, it just means sufficient to make a good estimated guess about which way the review will go. Most cases I present to you will have sufficient information, by my subjective standards.
 
 You must reply with json of the following form:
-{"decision": "Overturned", "probability": .82}
+{"decision": "Overturned", "probability": 0.82}
 
 with the decision, and the associated probability that that decision is correct. The possible decision
 classes are "Insufficient", "Upheld", and "Overturned".
@@ -23,10 +25,10 @@ classes are "Insufficient", "Upheld", and "Overturned".
 Here are two examples:
 
 Prompt: "An enrollee has requested Zepatier for treatment of her hepatitis C."
-Desired Output: {"decision": "Overturned", "probability": .75}
+Desired Output: {"decision": "Overturned", "probability": 0.75}
 
 Prompt: "An enrollee has requested emergency services provided on an emergent or urgent basis for treatment of her medical condition."
-Desired Output: {"decision": "Insufficient", "probability": .99}
+Desired Output: {"decision": "Insufficient", "probability": 0.99}
 """
 
 
@@ -84,7 +86,20 @@ def construct_answer_batch(recs: list[dict], output_path: str) -> None:
         outcome = rec["decision"]
         sufficiency_id = rec["sufficiency_id"]
 
-        answers.append({"custom_id": f"{custom_id}", "decision": construct_label(outcome, sufficiency_id)})
+        # Get metadata fields (default to "Unspecified" if not present)
+        jurisdiction = rec.get("jurisdiction", "Unspecified")
+        insurance_type = rec.get("insurance_type", "Unspecified")
+
+        # Include all fields in the answer
+        answers.append(
+            {
+                "custom_id": f"{custom_id}",
+                "decision": construct_label(outcome, sufficiency_id),
+                "sufficiency_id": sufficiency_id,
+                "jurisdiction": jurisdiction,
+                "insurance_type": insurance_type,
+            }
+        )
 
     add_jsonl_lines(output_path, answers)
 
@@ -104,7 +119,7 @@ def construct_request_batch(recs: list[dict], model_key: str, output_path: str) 
     return None
 
 
-def prepare_batches() -> None:
+def prepare_batches() -> tuple:
     recs = get_records_list(os.path.join("./data/outcomes/", OUTCOMES_DATASET + ".jsonl"))
     output_path = f"./data/provider_annotated_outcomes/openai/{OUTCOMES_DATASET}/hicric_eval_request_answers.jsonl"
     if os.path.exists(output_path):
@@ -122,7 +137,7 @@ def prepare_batches() -> None:
         # Full batch
         construct_request_batch(recs, MODEL_KEY, output_path)
         split_batch(single_batch_path=output_path, subbatch_dir=subbatch_dir)
-    return subbatch_dir
+    return subbatch_dir, recs
 
 
 def split_batch(single_batch_path, subbatch_dir, subbatch_size=1500) -> None:
@@ -136,7 +151,7 @@ def split_batch(single_batch_path, subbatch_dir, subbatch_size=1500) -> None:
     return None
 
 
-def batch_call(filepaths: list[str], api_key: str | None = OPENAI_API_KEY) -> None:
+def batch_call(filepaths: list[str], api_key: str | None = OPENAI_API_KEY) -> list[str]:
     """Submit a batch completion call for each batch file in filepaths."""
     if not api_key:
         raise Exception("You need to export an Open AI API key as an env var.")
@@ -174,7 +189,7 @@ def batch_call(filepaths: list[str], api_key: str | None = OPENAI_API_KEY) -> No
     return batch_request_ids
 
 
-def download_response(batch_id: str, subbatch_dir: str, api_key: str | None = OPENAI_API_KEY) -> None:
+def download_response(batch_id: str, subbatch_dir: str, api_key: str | None = OPENAI_API_KEY) -> str:
     client = OpenAI(api_key=api_key)
     status_meta = client.batches.retrieve(batch_id)
     download_path = os.path.join(subbatch_dir, f"response_{batch_id}.jsonl")
@@ -183,7 +198,7 @@ def download_response(batch_id: str, subbatch_dir: str, api_key: str | None = OP
 
 
 def poll_and_download(
-    batch_request_ids: list[str], subbatch_dir: str, poll_sleep_mins: int = 0.1, api_key: str | None = OPENAI_API_KEY
+    batch_request_ids: list[str], subbatch_dir: str, poll_sleep_mins: float = 0.1, api_key: str | None = OPENAI_API_KEY
 ) -> list[str]:
     client = OpenAI(api_key=api_key)
 
@@ -217,19 +232,95 @@ def merge_jsonl(paths: list[str], output_path):
     return None
 
 
+def synchronous_call(records: list[dict], api_key: str | None = OPENAI_API_KEY) -> list[dict]:
+    """Make synchronous API calls one at a time for each record."""
+    if not api_key:
+        raise Exception("You need to export an Open AI API key as an env var.")
+
+    client = OpenAI(api_key=api_key)
+    results = []
+
+    print(f"Processing {len(records)} records synchronously...")
+    for idx, rec in enumerate(records):
+        case_description = rec["text"]
+        custom_id = idx
+
+        print(f"Processing record {idx+1}/{len(records)}")
+        try:
+            response = client.chat.completions.create(
+                model=MODEL_KEY,
+                messages=[{"role": "system", "content": SYSTEM_MESSAGE}, {"role": "user", "content": case_description}],
+            )
+
+            # Get the response content
+            completion_text = response.choices[0].message.content
+
+            # Parse JSON response
+            try:
+                completion_json = json.loads(completion_text)
+            except json.JSONDecodeError:
+                print(f"Failed to parse JSON for record {idx}: {completion_text}")
+                completion_json = {"decision": "Error", "probability": 0}
+
+            # Create result record
+            result = {
+                "custom_id": str(custom_id),
+                "request": {
+                    "body": {
+                        "messages": [
+                            {"role": "system", "content": SYSTEM_MESSAGE},
+                            {"role": "user", "content": case_description},
+                        ]
+                    }
+                },
+                "response": {"choices": [{"message": {"content": completion_text, "role": "assistant"}}]},
+                "parsed_response": completion_json,
+            }
+
+            results.append(result)
+
+        except Exception as e:
+            print(f"Error processing record {idx}: {str(e)}")
+            # Add error record
+            results.append({"custom_id": str(custom_id), "error": str(e)})
+
+    return results
+
+
 if __name__ == "__main__":
-    subbatch_dir = prepare_batches()
-    filenames = [os.path.join(subbatch_dir, filename) for filename in os.listdir(subbatch_dir)]
+    parser = argparse.ArgumentParser(description="Run OpenAI API calls for health insurance claim evaluations")
+    parser.add_argument("--synchronous", action="store_true", help="Use synchronous API calls instead of batch")
+    args = parser.parse_args()
 
-    # Can only upload small number of files at a time due to enque limit
-    all_output_files = []
-    batch_size = 1
-    for start_idx in range(0, len(filenames), batch_size):
-        enqueued_files = filenames[start_idx : start_idx + batch_size]
-        batch_request_ids = batch_call(enqueued_files)
-        output_files = poll_and_download(batch_request_ids, subbatch_dir)
-        all_output_files.extend(output_files)
+    subbatch_dir, records = prepare_batches()
 
-    # Merge to single response
-    output_path = f"./data/provider_annotated_outcomes/openai/{OUTCOMES_DATASET}/hicric_eval_response_{MODEL_KEY}.jsonl"
-    merge_jsonl(all_output_files, output_path)
+    if args.synchronous:
+        # Synchronous mode
+        print("Running in synchronous mode...")
+        results = synchronous_call(records)
+
+        # Save results
+        output_path = (
+            f"./data/provider_annotated_outcomes/openai/{OUTCOMES_DATASET}/hicric_eval_response_sync_{MODEL_KEY}.jsonl"
+        )
+        add_jsonl_lines(output_path, results)
+        print(f"Synchronous results saved to {output_path}")
+    else:
+        # Batch mode (original behavior)
+        filenames = [os.path.join(subbatch_dir, filename) for filename in os.listdir(subbatch_dir)]
+
+        # Can only upload small number of files at a time due to enque limit
+        all_output_files = []
+        batch_size = 1
+        for start_idx in range(0, len(filenames), batch_size):
+            enqueued_files = filenames[start_idx : start_idx + batch_size]
+            batch_request_ids = batch_call(enqueued_files)
+            output_files = poll_and_download(batch_request_ids, subbatch_dir)
+            all_output_files.extend(output_files)
+
+        # Merge to single response
+        output_path = (
+            f"./data/provider_annotated_outcomes/openai/{OUTCOMES_DATASET}/hicric_eval_response_{MODEL_KEY}.jsonl"
+        )
+        merge_jsonl(all_output_files, output_path)
+        print(f"Batch results saved to {output_path}")
