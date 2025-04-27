@@ -21,4 +21,4 @@ compile: True # Whether to use torch compile
 # Test eval settings
 test_data_path: "./data/outcomes/test_backgrounds_suff.jsonl"
 checkpoint_name: "checkpoint-20736"
-eval_threshold: .5
+eval_threshold: .55
