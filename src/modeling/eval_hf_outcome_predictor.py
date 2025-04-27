@@ -5,6 +5,7 @@ import os
 import numpy as np
 import scipy
 import torch
+from safetensors import safe_open
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
@@ -38,6 +39,91 @@ def construct_label(outcome, sufficiency_id, label2id):
         return 0
     else:
         return label2id[outcome]
+
+
+def inspect_model_metadata(checkpoint_path):
+    """Load a saved model in safetensors format and examine its metadata components."""
+    # Path to the safetensors file
+    safetensors_path = os.path.join(checkpoint_path, "model.safetensors")
+    if not os.path.exists(safetensors_path):
+        # Try alternate naming patterns
+        potential_paths = [
+            os.path.join(checkpoint_path, "pytorch_model.safetensors"),
+            os.path.join(checkpoint_path, "model.safetensors"),
+        ]
+        for path in potential_paths:
+            if os.path.exists(path):
+                safetensors_path = path
+                break
+
+    print(f"Loading model from {safetensors_path}")
+
+    if not os.path.exists(safetensors_path):
+        print(f"No safetensors file found at {safetensors_path}")
+        return None
+
+    # Load the model using safetensors
+    tensors = {}
+    with safe_open(safetensors_path, framework="pt", device="cpu") as f:
+        for key in f.keys():
+            tensors[key] = f.get_tensor(key)
+
+    # Check if metadata_scale exists and print its value
+    if "metadata_scale" in tensors:
+        metadata_scale = tensors["metadata_scale"].item()
+        print(f"Metadata scale: {metadata_scale}")
+    else:
+        print("metadata_scale not found in state dict")
+        # Try looking for it with model prefix
+        for key in tensors:
+            if key.endswith("metadata_scale"):
+                metadata_scale = tensors[key].item()
+                print(f"Found metadata scale as {key}: {metadata_scale}")
+
+    if "attention_scale" in tensors:
+        attention_scale = tensors["attention_scale"].item()
+        print(f"Attention scale: {attention_scale}")
+    else:
+        # Try looking for it with model prefix
+        for key in tensors:
+            if key.endswith("attention_scale"):
+                attention_scale = tensors[key].item()
+                print(f"Found attention scale as {key}: {attention_scale}")
+
+    # Find embedding keys
+    j_embedding_key = None
+    i_embedding_key = None
+    for key in tensors:
+        if "jurisdiction_embeddings.weight" in key:
+            j_embedding_key = key
+        if "insurance_type_embeddings.weight" in key:
+            i_embedding_key = key
+
+    # Check embedding distances
+    if j_embedding_key and i_embedding_key:
+        j_embeddings = tensors[j_embedding_key].numpy()
+        i_embeddings = tensors[i_embedding_key].numpy()
+
+        print(f"Jurisdiction embedding shape: {j_embeddings.shape}")
+        print(f"Insurance type embedding shape: {i_embeddings.shape}")
+
+        # Calculate distances between embeddings
+        if j_embeddings.shape[0] >= 2:
+            j_distance = np.linalg.norm(j_embeddings[0] - j_embeddings[1])
+            print(f"Distance between jurisdiction embeddings (0 vs 1): {j_distance}")
+
+        if i_embeddings.shape[0] >= 2:
+            i_distance = np.linalg.norm(i_embeddings[0] - i_embeddings[1])
+            print(f"Distance between insurance type embeddings (0 vs 1): {i_distance}")
+    else:
+        print("Embedding weights not found in tensors")
+        print("Available keys:", list(tensors.keys()))
+
+    return {
+        "metadata_scale": metadata_scale if "metadata_scale" in tensors else None,
+        "j_embeddings": j_embeddings if j_embedding_key else None,
+        "i_embeddings": i_embeddings if i_embedding_key else None,
+    }
 
 
 def compute_metrics(predictions: np.ndarray, labels: np.ndarray) -> dict:
@@ -184,6 +270,8 @@ def main(config_path: str):
     checkpoints_dir = os.path.join(MODEL_DIR, "train_backgrounds_suff_augmented", base_model_name)
     print("Evaluating from checkpoint: ", checkpoint_name)
     ckpt_path = os.path.join(checkpoints_dir, checkpoint_name)
+
+    _results = inspect_model_metadata(ckpt_path)
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
