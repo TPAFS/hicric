@@ -5,7 +5,10 @@ from functools import partial
 
 import numpy as np
 import scipy
-from datasets import Dataset, load_dataset
+import torch
+import torch.nn as nn
+import wandb
+from datasets import Dataset, DatasetDict, load_dataset
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
@@ -13,35 +16,57 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
+from sklearn.model_selection import train_test_split
 from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
+    BertForSequenceClassification,
     DataCollatorWithPadding,
+    DistilBertForSequenceClassification,
     Trainer,
     TrainingArguments,
 )
+from transformers.modeling_outputs import SequenceClassifierOutput
 
-import wandb
 from src.modeling.util import export_onnx_model, load_config, quantize_onnx_model
 from src.util import get_records_list
 
 ID2LABEL = {0: "Insufficient", 1: "Upheld", 2: "Overturned"}
 LABEL2ID = {v: k for k, v in ID2LABEL.items()}
+
+# Define mappings for jurisdiction and insurance type
+JURISDICTION_MAP = {"NY": 0, "CA": 1, "Unspecified": 2}
+INSURANCE_TYPE_MAP = {"Commercial": 0, "Medicaid": 1, "Unspecified": 2}
+
 OUTPUT_DIR = "./models/overturn_predictor"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 def load_and_split(
-    jsonl_path: str, test_size: float = 0.2, filter_keys: list = ["decision", "text", "sufficiency_id"], seed: int = 2
+    jsonl_path: str,
+    test_size: float = 0.2,
+    filter_keys: list = ["decision", "text", "sufficiency_id", "jurisdiction", "insurance_type"],
+    seed: int = 2,
 ) -> Dataset:
     if len(filter_keys) > 0:
         recs = get_records_list(jsonl_path)
-        recs = [{key: rec[key] for key in filter_keys} for rec in recs]
+        recs = [{key: rec.get(key, "Unspecified") for key in filter_keys} for rec in recs]
         dataset = Dataset.from_list(recs)
+
     else:
         dataset = load_dataset("json", data_files=jsonl_path)["train"]
-    dataset = dataset.train_test_split(test_size=test_size, seed=1)
-    return dataset
+
+    # Use scikit-learn train_test_split for stratified sampling
+    train_indices, test_indices = train_test_split(
+        list(range(len(dataset))), test_size=test_size, random_state=seed, shuffle=True, stratify=dataset["decision"]
+    )
+
+    # Create train and test datasets using the indices
+    train_dataset = dataset.select(train_indices)
+    test_dataset = dataset.select(test_indices)
+
+    # Return as a DatasetDict
+    return DatasetDict({"train": train_dataset, "test": test_dataset})
 
 
 def tokenize_batch(examples, tokenizer):
@@ -59,10 +84,20 @@ def construct_label(outcome: str, sufficiency_id: int, label2id: dict) -> int:
         return label2id[outcome]
 
 
-def add_integral_ids_batch(examples, label2id: dict):
+def add_integral_ids_batch(examples, label2id: dict, jurisdiction_map: dict, insurance_type_map: dict):
     outcomes = examples["decision"]
     sufficiency_ids = examples["sufficiency_id"]
+
+    # Map jurisdiction and insurance_type to their respective IDs
+    jurisdictions = examples.get("jurisdiction", ["Unspecified"] * len(outcomes))
+    insurance_types = examples.get("insurance_type", ["Unspecified"] * len(outcomes))
+
     examples["label"] = [construct_label(outcome, id, label2id) for (outcome, id) in zip(outcomes, sufficiency_ids)]
+    examples["jurisdiction_id"] = [jurisdiction_map.get(j, jurisdiction_map["Unspecified"]) for j in jurisdictions]
+    examples["insurance_type_id"] = [
+        insurance_type_map.get(i, insurance_type_map["Unspecified"]) for i in insurance_types
+    ]
+
     return examples
 
 
@@ -155,6 +190,485 @@ def compute_metrics2(eval_pred) -> dict:
     return best_metrics
 
 
+class TextClassificationWithMetadata(DistilBertForSequenceClassification):
+    def __init__(self, config):
+        super().__init__(config)
+        self.hidden_size = config.hidden_size
+
+        # Metadata embeddings
+        self.jurisdiction_embeddings = nn.Embedding(2, self.hidden_size // 4)
+        self.insurance_type_embeddings = nn.Embedding(2, self.hidden_size // 4)
+
+        # Fusion projection
+        self.metadata_projection = nn.Sequential(
+            nn.Linear(self.hidden_size // 2, self.hidden_size),
+            nn.LayerNorm(self.hidden_size),
+            nn.GELU(),
+            nn.Dropout(0.1),
+        )
+
+        # Manual cross-attention components
+        self.num_heads = 8
+        self.head_dim = self.hidden_size // self.num_heads
+
+        # Query, Key, Value projections
+        self.q_proj = nn.Linear(self.hidden_size, self.hidden_size)
+        self.k_proj = nn.Linear(self.hidden_size, self.hidden_size)
+        self.v_proj = nn.Linear(self.hidden_size, self.hidden_size)
+        self.out_proj = nn.Linear(self.hidden_size, self.hidden_size)
+
+        self.dropout = nn.Dropout(0.1)
+
+        self.metadata_norm = nn.LayerNorm(self.hidden_size)
+        self.sequence_norm = nn.LayerNorm(self.hidden_size)
+
+        # Save the original num_labels
+        self.num_labels = (
+            self.classifier.out_features if hasattr(self.classifier, "out_features") else config.num_labels
+        )
+
+        # Now replace the classifier
+        self.enhanced_classifier = nn.Sequential(
+            nn.Linear(self.hidden_size, self.hidden_size),
+            nn.LayerNorm(self.hidden_size),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(self.hidden_size, self.num_labels),
+        )
+
+    def manual_cross_attention(self, query, key, value, key_padding_mask=None):
+        # Same implementation, but with explicit cleanup
+        batch_size = query.size(1)
+        seq_length = key.size(0)
+
+        # Project query, key, value
+        q = self.q_proj(query)
+        k = self.k_proj(key)
+        v = self.v_proj(value)
+
+        # Reshape for multi-head attention
+        q = q.view(1, batch_size, self.num_heads, self.head_dim).permute(2, 1, 0, 3)
+        k = k.view(seq_length, batch_size, self.num_heads, self.head_dim).permute(2, 1, 0, 3)
+        v = v.view(seq_length, batch_size, self.num_heads, self.head_dim).permute(2, 1, 0, 3)
+
+        # Calculate attention scores
+        scaling = float(self.head_dim) ** -0.5
+        q = q * scaling
+        attn_scores = torch.matmul(q, k.transpose(-2, -1))
+
+        # Apply attention mask if provided
+        if key_padding_mask is not None:
+            attn_mask = key_padding_mask.unsqueeze(1).unsqueeze(1)
+            attn_mask = attn_mask.transpose(0, 1)
+            attn_mask = attn_mask.expand(self.num_heads, -1, 1, -1)
+            attn_scores = attn_scores.masked_fill(attn_mask, -10000.0)
+
+        # Get max values for numerical stability
+        attn_scores_max, _ = torch.max(attn_scores, dim=-1, keepdim=True)
+        attn_scores = attn_scores - attn_scores_max
+
+        # Apply softmax
+        attn_weights = torch.exp(torch.clamp(attn_scores, min=-10000.0, max=100.0))
+        attn_sum = torch.sum(attn_weights, dim=-1, keepdim=True) + 1e-6
+        attn_weights = attn_weights / attn_sum
+
+        # Apply dropout
+        attn_weights = self.dropout(attn_weights)
+
+        # Clean up intermediates
+        del attn_scores, attn_scores_max, attn_sum
+        if key_padding_mask is not None:
+            del attn_mask
+
+        # Apply attention weights to values
+        context = torch.matmul(attn_weights, v)
+
+        # Clean up more intermediates
+        del attn_weights
+
+        # Reshape back
+        context = context.permute(2, 1, 0, 3)
+        context = context.reshape(1, batch_size, self.hidden_size)
+
+        # Clean up
+        del q, k, v
+
+        # Apply output projection
+        result = self.out_proj(context)
+
+        # Final cleanup
+        del context
+
+        return result
+
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        jurisdiction_id=None,
+        insurance_type_id=None,
+        labels=None,
+        return_dict=None,
+        token_type_ids=None,
+    ):
+        # Validate that required parameters are provided, use index 2 for optional
+        if jurisdiction_id is None or insurance_type_id is None:
+            raise ValueError("jurisdiction_id and insurance_type_id must be provided")
+
+        # Process metadata
+        j_unspecified_mask = jurisdiction_id == 2
+        i_unspecified_mask = insurance_type_id == 2
+
+        # Temporarily assign unspecified metadata classes -> 1
+        j_ids_valid = torch.clamp(jurisdiction_id, 0, 1)
+        i_ids_valid = torch.clamp(insurance_type_id, 0, 1)
+
+        j_embeddings = self.jurisdiction_embeddings(j_ids_valid)
+        i_embeddings = self.insurance_type_embeddings(i_ids_valid)
+
+        avg_j_embedding = self.jurisdiction_embeddings.weight.mean(dim=0)
+        avg_i_embedding = self.insurance_type_embeddings.weight.mean(dim=0)
+
+        # Assign unspecified classes the average embeddings
+        j_embeddings = torch.where(
+            j_unspecified_mask.unsqueeze(-1).expand_as(j_embeddings),
+            avg_j_embedding.expand_as(j_embeddings),
+            j_embeddings,
+        )
+        i_embeddings = torch.where(
+            i_unspecified_mask.unsqueeze(-1).expand_as(i_embeddings),
+            avg_i_embedding.expand_as(i_embeddings),
+            i_embeddings,
+        )
+
+        # Combine metadata and project
+        combined_metadata = torch.cat([j_embeddings, i_embeddings], dim=1)
+        metadata_features = self.metadata_projection(combined_metadata)
+
+        # Call the parent model but bypass its classification head
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        base_outputs = super().forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True,  # We need the hidden states
+            return_dict=True,
+            token_type_ids=token_type_ids,
+            labels=None,  # Don't pass labels yet
+        )
+
+        sequence_output = base_outputs.hidden_states[-1]
+
+        # Use cross-attention for fusion
+        metadata_features = self.metadata_norm(metadata_features)
+        sequence_output = self.sequence_norm(sequence_output)
+
+        # Reshape for attention
+        metadata_features = metadata_features.unsqueeze(0)  # [1, batch, hidden_dim]
+        sequence_output_t = sequence_output.transpose(0, 1)  # [seq_len, batch, hidden_dim]
+
+        key_padding_mask = attention_mask == 0
+
+        fused_features = self.manual_cross_attention(
+            query=metadata_features, key=sequence_output_t, value=sequence_output_t, key_padding_mask=key_padding_mask
+        )
+
+        # Combine with CLS token
+        fused_features = fused_features.squeeze(0) + sequence_output[:, 0]
+
+        logits = self.enhanced_classifier(fused_features)
+
+        # Calculate loss if labels provided
+        loss = None
+        if labels is not None:
+            loss = torch.nn.functional.cross_entropy(logits.view(-1, self.num_labels), labels.view(-1))
+
+        if return_dict:
+            return SequenceClassifierOutput(
+                loss=loss,
+                logits=logits,
+                hidden_states=base_outputs.hidden_states,
+                attentions=base_outputs.attentions,
+            )
+        else:
+            output = (logits,) + base_outputs[2:]
+            return ((loss,) + output) if loss is not None else output
+
+
+# Nearly identical but inherits from DistilBertForSequenceClassification
+# and doesn't use token_type_ids
+class DistilBertTextClassificationWithMetadata(DistilBertForSequenceClassification):
+    def __init__(self, config):
+        super().__init__(config)
+        self.hidden_size = config.hidden_size
+
+        # Metadata embeddings
+        self.jurisdiction_embeddings = nn.Embedding(2, self.hidden_size // 4)
+        self.insurance_type_embeddings = nn.Embedding(2, self.hidden_size // 4)
+
+        # Fusion projection
+        self.metadata_projection = nn.Sequential(
+            nn.Linear(self.hidden_size // 2, self.hidden_size),
+            nn.LayerNorm(self.hidden_size),
+            nn.GELU(),
+            nn.Dropout(0.1),
+        )
+
+        # Manual cross-attention components
+        self.num_heads = 8
+        self.head_dim = self.hidden_size // self.num_heads
+
+        # Query, Key, Value projections
+        self.q_proj = nn.Linear(self.hidden_size, self.hidden_size)
+        self.k_proj = nn.Linear(self.hidden_size, self.hidden_size)
+        self.v_proj = nn.Linear(self.hidden_size, self.hidden_size)
+        self.out_proj = nn.Linear(self.hidden_size, self.hidden_size)
+
+        self.dropout = nn.Dropout(0.1)
+
+        self.metadata_norm = nn.LayerNorm(self.hidden_size)
+        self.sequence_norm = nn.LayerNorm(self.hidden_size)
+
+        # Save the original num_labels
+        self.num_labels = (
+            self.classifier.out_features if hasattr(self.classifier, "out_features") else config.num_labels
+        )
+
+        # Now replace the classifier
+        self.enhanced_classifier = nn.Sequential(
+            nn.Linear(self.hidden_size, self.hidden_size),
+            nn.LayerNorm(self.hidden_size),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(self.hidden_size, self.num_labels),
+        )
+
+    def manual_cross_attention(self, query, key, value, key_padding_mask=None):
+        # Same implementation, but with explicit cleanup
+        batch_size = query.size(1)
+        seq_length = key.size(0)
+
+        # Project query, key, value
+        q = self.q_proj(query)
+        k = self.k_proj(key)
+        v = self.v_proj(value)
+
+        # Reshape for multi-head attention
+        q = q.view(1, batch_size, self.num_heads, self.head_dim).permute(2, 1, 0, 3)
+        k = k.view(seq_length, batch_size, self.num_heads, self.head_dim).permute(2, 1, 0, 3)
+        v = v.view(seq_length, batch_size, self.num_heads, self.head_dim).permute(2, 1, 0, 3)
+
+        # Calculate attention scores
+        scaling = float(self.head_dim) ** -0.5
+        q = q * scaling
+        attn_scores = torch.matmul(q, k.transpose(-2, -1))
+
+        # Apply attention mask if provided
+        if key_padding_mask is not None:
+            attn_mask = key_padding_mask.unsqueeze(1).unsqueeze(1)
+            attn_mask = attn_mask.transpose(0, 1)
+            attn_mask = attn_mask.expand(self.num_heads, -1, 1, -1)
+            attn_scores = attn_scores.masked_fill(attn_mask, -10000.0)
+
+        # Get max values for numerical stability
+        attn_scores_max, _ = torch.max(attn_scores, dim=-1, keepdim=True)
+        attn_scores = attn_scores - attn_scores_max
+
+        # Apply softmax
+        attn_weights = torch.exp(torch.clamp(attn_scores, min=-10000.0, max=100.0))
+        attn_sum = torch.sum(attn_weights, dim=-1, keepdim=True) + 1e-6
+        attn_weights = attn_weights / attn_sum
+
+        # Apply dropout
+        attn_weights = self.dropout(attn_weights)
+
+        # Clean up intermediates
+        del attn_scores, attn_scores_max, attn_sum
+        if key_padding_mask is not None:
+            del attn_mask
+
+        # Apply attention weights to values
+        context = torch.matmul(attn_weights, v)
+
+        # Clean up more intermediates
+        del attn_weights
+
+        # Reshape back
+        context = context.permute(2, 1, 0, 3)
+        context = context.reshape(1, batch_size, self.hidden_size)
+
+        # Clean up
+        del q, k, v
+
+        # Apply output projection
+        result = self.out_proj(context)
+
+        # Final cleanup
+        del context
+
+        return result
+
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        jurisdiction_id=None,
+        insurance_type_id=None,
+        labels=None,
+        return_dict=None,
+        token_type_ids=None,  # This parameter is left for API compatibility but not used
+    ):
+        # Validate that required parameters are provided, use index 2 for optional
+        if jurisdiction_id is None or insurance_type_id is None:
+            raise ValueError("jurisdiction_id and insurance_type_id must be provided")
+
+        # Process metadata
+        j_unspecified_mask = jurisdiction_id == 2
+        i_unspecified_mask = insurance_type_id == 2
+
+        # Temporarily assign unspecified metadata classes -> 1
+        j_ids_valid = torch.clamp(jurisdiction_id, 0, 1)
+        i_ids_valid = torch.clamp(insurance_type_id, 0, 1)
+
+        j_embeddings = self.jurisdiction_embeddings(j_ids_valid)
+        i_embeddings = self.insurance_type_embeddings(i_ids_valid)
+
+        avg_j_embedding = self.jurisdiction_embeddings.weight.mean(dim=0)
+        avg_i_embedding = self.insurance_type_embeddings.weight.mean(dim=0)
+
+        # Assign unspecified classes the average embeddings
+        j_embeddings = torch.where(
+            j_unspecified_mask.unsqueeze(-1).expand_as(j_embeddings),
+            avg_j_embedding.expand_as(j_embeddings),
+            j_embeddings,
+        )
+        i_embeddings = torch.where(
+            i_unspecified_mask.unsqueeze(-1).expand_as(i_embeddings),
+            avg_i_embedding.expand_as(i_embeddings),
+            i_embeddings,
+        )
+
+        # Combine metadata and project
+        combined_metadata = torch.cat([j_embeddings, i_embeddings], dim=1)
+        metadata_features = self.metadata_projection(combined_metadata)
+
+        # Call the parent model but bypass its classification head
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        base_outputs = super().forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            # No token_type_ids for DistilBERT
+            output_hidden_states=True,  # We need the hidden states
+            return_dict=True,
+            labels=None,  # Don't pass labels yet
+        )
+
+        sequence_output = base_outputs.hidden_states[-1]
+
+        # Use cross-attention for fusion
+        metadata_features = self.metadata_norm(metadata_features)
+        sequence_output = self.sequence_norm(sequence_output)
+
+        # Reshape for attention
+        metadata_features = metadata_features.unsqueeze(0)  # [1, batch, hidden_dim]
+        sequence_output_t = sequence_output.transpose(0, 1)  # [seq_len, batch, hidden_dim]
+
+        key_padding_mask = attention_mask == 0
+
+        fused_features = self.manual_cross_attention(
+            query=metadata_features, key=sequence_output_t, value=sequence_output_t, key_padding_mask=key_padding_mask
+        )
+
+        # Combine with CLS token
+        fused_features = fused_features.squeeze(0) + sequence_output[:, 0]
+
+        logits = self.enhanced_classifier(fused_features)
+
+        # Calculate loss if labels provided
+        loss = None
+        if labels is not None:
+            loss = torch.nn.functional.cross_entropy(logits.view(-1, self.num_labels), labels.view(-1))
+
+        if return_dict:
+            return SequenceClassifierOutput(
+                loss=loss,
+                logits=logits,
+                hidden_states=base_outputs.hidden_states,
+                attentions=base_outputs.attentions,
+            )
+        else:
+            output = (logits,) + base_outputs[2:]
+            return ((loss,) + output) if loss is not None else output
+
+
+class DataCollatorWithMetadata(DataCollatorWithPadding):
+    def __call__(self, features):
+        batch = super().__call__(features)
+
+        # Add the jurisdiction and insurance type IDs to the batch
+        if "jurisdiction_id" in features[0]:
+            batch["jurisdiction_id"] = torch.tensor([f["jurisdiction_id"] for f in features])
+
+        if "insurance_type_id" in features[0]:
+            batch["insurance_type_id"] = torch.tensor([f["insurance_type_id"] for f in features])
+
+        return batch
+
+
+class CPUEvalTrainer(Trainer):
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        has_labels = all(inputs.get(k) is not None for k in self.label_names)
+        inputs = self._prepare_inputs(inputs)
+
+        with torch.no_grad():
+            outputs = model(**inputs)
+            logits = outputs.logits
+
+            # Move logits to CPU immediately to save GPU memory
+            logits = logits.detach().cpu()
+
+            labels = None
+            if has_labels:
+                labels = tuple(inputs.get(name).detach().cpu() for name in self.label_names)
+                if len(labels) == 1:
+                    labels = labels[0]
+
+            loss = None
+            if has_labels and outputs.loss is not None:
+                loss = outputs.loss.detach().cpu()
+
+        return (loss, logits, labels)
+
+
+def create_metadata_model(pretrained_model_key, base_model_name, num_labels, id2label, label2id):
+    # Map of base model names to model classes
+    MODEL_CLASS_MAP = {
+        # BERT-based models
+        "legal-bert-small-uncased": TextClassificationWithMetadata,
+        # DistilBERT-based models
+        "distilbert": DistilBertTextClassificationWithMetadata,
+        "clinicalbert": DistilBertTextClassificationWithMetadata,
+    }
+
+    # Get model class based on base_model_name
+    # This will use TextClassificationWithMetadata by default for unrecognized models
+    model_class = MODEL_CLASS_MAP.get(
+        base_model_name,
+        DistilBertTextClassificationWithMetadata
+        if "distilbert" in base_model_name.lower()
+        else TextClassificationWithMetadata,
+    )
+
+    # Create and return the appropriate model
+    return model_class.from_pretrained(
+        pretrained_model_key,
+        num_labels=num_labels,
+        id2label=id2label,
+        label2id=label2id,
+    )
+
+
 def main(config_path: str) -> None:
     cfg = load_config(config_path)
 
@@ -193,12 +707,22 @@ def main(config_path: str) -> None:
 
     # Prepare dataset for training
     dataset = dataset.map(partial(tokenize_batch, tokenizer=tokenizer), batched=True)
-    dataset = dataset.map(partial(add_integral_ids_batch, label2id=LABEL2ID), batched=True)
+    dataset = dataset.map(
+        partial(
+            add_integral_ids_batch,
+            label2id=LABEL2ID,
+            jurisdiction_map=JURISDICTION_MAP,
+            insurance_type_map=INSURANCE_TYPE_MAP,
+        ),
+        batched=True,
+    )
 
-    data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
+    # Use our custom data collator that handles the additional features
+    data_collator = DataCollatorWithMetadata(tokenizer=tokenizer)
 
-    model = AutoModelForSequenceClassification.from_pretrained(
-        pretrained_model_key,
+    model = create_metadata_model(
+        pretrained_model_key=pretrained_model_key,
+        base_model_name=base_model_name,
         num_labels=3,
         id2label=ID2LABEL,
         label2id=LABEL2ID,
@@ -213,9 +737,11 @@ def main(config_path: str) -> None:
     checkpoints_dir = os.path.join(OUTPUT_DIR, dataset_name, outdir_name)
     training_args = TrainingArguments(
         output_dir=checkpoints_dir,
+        run_name=cfg["wandb_run_tag"],
         learning_rate=cfg["learning_rate"],
         per_device_train_batch_size=cfg["batch_size"],
         per_device_eval_batch_size=cfg["batch_size"],
+        eval_accumulation_steps=16,
         num_train_epochs=cfg["num_epochs"],
         weight_decay=cfg["weight_decay"],
         fp16=(cfg["dtype"] == "float16"),
@@ -229,7 +755,7 @@ def main(config_path: str) -> None:
         dataloader_pin_memory=True,
     )
 
-    trainer = Trainer(
+    trainer = CPUEvalTrainer(
         model=model,
         args=training_args,
         train_dataset=dataset["train"],

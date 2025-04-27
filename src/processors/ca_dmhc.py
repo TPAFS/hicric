@@ -36,6 +36,8 @@ def process(source_lineitem: dict, output_dirname: str) -> dict:
             "decision": tuple[1],
             "appeal_type": tuple[2],
             "appeal_expedited_status": tuple[3],
+            "jurisdiction": "CA",
+            "insurance_type": "Commercial",
         }
         add_jsonl_line(outfile, line_data)
 
