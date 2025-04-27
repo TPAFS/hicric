@@ -5,7 +5,6 @@ from functools import partial
 
 import numpy as np
 import scipy
-import wandb
 from datasets import Dataset, load_dataset
 from sklearn.metrics import (
     accuracy_score,
@@ -22,6 +21,7 @@ from transformers import (
     TrainingArguments,
 )
 
+import wandb
 from src.modeling.util import export_onnx_model, load_config, quantize_onnx_model
 from src.util import get_records_list
 
@@ -219,7 +219,7 @@ def main(config_path: str) -> None:
         num_train_epochs=cfg["num_epochs"],
         weight_decay=cfg["weight_decay"],
         fp16=(cfg["dtype"] == "float16"),
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=1,
         load_best_model_at_end=True,
@@ -234,7 +234,7 @@ def main(config_path: str) -> None:
         args=training_args,
         train_dataset=dataset["train"],
         eval_dataset=dataset["test"],
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics2,
     )

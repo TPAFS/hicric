@@ -292,7 +292,7 @@ def replace_path_component(path: str, component_idx: int, new_text: str) -> str:
     return "/".join(components)
 
 
-def get_records_list(path: str) -> list[str]:
+def get_records_list(path: str) -> list[dict]:
     recs = []
     with open(path, "r") as file:
         for line in file:
