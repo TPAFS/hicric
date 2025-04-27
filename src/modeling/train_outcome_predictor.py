@@ -7,6 +7,7 @@ import numpy as np
 import scipy
 import torch
 import torch.nn as nn
+import wandb
 from datasets import Dataset, DatasetDict, load_dataset
 from sklearn.metrics import (
     accuracy_score,
@@ -27,7 +28,6 @@ from transformers import (
 )
 from transformers.modeling_outputs import SequenceClassifierOutput
 
-import wandb
 from src.modeling.util import export_onnx_model, load_config, quantize_onnx_model
 from src.util import get_records_list
 

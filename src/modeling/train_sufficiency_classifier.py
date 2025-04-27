@@ -7,6 +7,7 @@ from functools import partial
 import numpy as np
 import scipy
 import torch
+import wandb
 from datasets import Dataset
 from sklearn.metrics import (
     accuracy_score,
@@ -23,7 +24,6 @@ from transformers import (
     TrainingArguments,
 )
 
-import wandb
 from src.modeling.data_augmentation import (
     load_augmented_dataset,
     process_and_save_augmentations,

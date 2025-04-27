@@ -9,6 +9,7 @@ from functools import partial
 
 import datasets
 import numpy as np
+import wandb
 from datasets import Dataset
 from transformers import (
     AutoModelForMaskedLM,
@@ -18,7 +19,6 @@ from transformers import (
     default_data_collator,
 )
 
-import wandb
 from src.modeling.util import load_config
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
