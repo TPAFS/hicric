@@ -3,6 +3,7 @@ import os
 import torch
 import yaml
 from onnxruntime.quantization import QuantType, quantize_dynamic
+from onnxruntime.quantization.shape_inference import quant_pre_process
 from transformers import AutoModel, AutoTokenizer
 
 
@@ -79,10 +80,17 @@ def export_onnx_model(output_model_path: str, model: torch.nn.Module | AutoModel
 
 
 def quantize_onnx_model(onnx_model_path: str, quantized_model_path: str):
+    # print("Preprocessing ONNX model before quantization...")
+    # pre_processed_model_path = onnx_model_path + ".pre_processed.onnx"
+
+    # quant_pre_process(onnx_model_path, pre_processed_model_path)
+
     # Quantize the model
     quantize_dynamic(
         onnx_model_path,
         quantized_model_path,
+        per_channel=False,
+        reduce_range=False,
         weight_type=QuantType.QInt8,
     )
     print(f"Quantized model saved to: {quantized_model_path}")
