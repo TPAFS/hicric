@@ -14,12 +14,11 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from transformers import (
-    AutoModelForSequenceClassification,
     AutoTokenizer,
     TextClassificationPipeline,
 )
 
-from src.modeling.train_outcome_predictor import TextClassificationWithMetadata
+from src.modeling.train_outcome_predictor import create_metadata_model
 from src.modeling.util import load_config
 from src.util import get_records_list
 
@@ -276,12 +275,9 @@ def main(config_path: str):
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
 
-    # Load model
-    # model = AutoModelForSequenceClassification.from_pretrained(
-    #     ckpt_path, num_labels=3, id2label=ID2LABEL, label2id=LABEL2ID
-    # )
-    model = TextClassificationWithMetadata.from_pretrained(
-        ckpt_path,
+    model = create_metadata_model(
+        pretrained_model_key=ckpt_path,
+        base_model_name=base_model_name,
         num_labels=3,
         id2label=ID2LABEL,
         label2id=LABEL2ID,
