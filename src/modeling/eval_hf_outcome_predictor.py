@@ -5,6 +5,7 @@ import os
 import numpy as np
 import scipy
 import torch
+from safetensors import safe_open
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
@@ -13,17 +14,21 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from transformers import (
-    AutoModelForSequenceClassification,
     AutoTokenizer,
     TextClassificationPipeline,
 )
 
+from src.modeling.train_outcome_predictor import create_metadata_model
 from src.modeling.util import load_config
 from src.util import get_records_list
 
 MODEL_DIR = "./models/overturn_predictor"
 ID2LABEL = {0: "Insufficient", 1: "Upheld", 2: "Overturned"}
 LABEL2ID = {v: k for k, v in ID2LABEL.items()}
+
+# Define mappings for jurisdiction and insurance type
+JURISDICTION_MAP = {"NY": 0, "CA": 1, "Unspecified": 2}
+INSURANCE_TYPE_MAP = {"Commercial": 0, "Medicaid": 1, "Unspecified": 2}
 
 
 # TODO: centralize label construction, label consts
@@ -33,6 +38,91 @@ def construct_label(outcome, sufficiency_id, label2id):
         return 0
     else:
         return label2id[outcome]
+
+
+def inspect_model_metadata(checkpoint_path):
+    """Load a saved model in safetensors format and examine its metadata components."""
+    # Path to the safetensors file
+    safetensors_path = os.path.join(checkpoint_path, "model.safetensors")
+    if not os.path.exists(safetensors_path):
+        # Try alternate naming patterns
+        potential_paths = [
+            os.path.join(checkpoint_path, "pytorch_model.safetensors"),
+            os.path.join(checkpoint_path, "model.safetensors"),
+        ]
+        for path in potential_paths:
+            if os.path.exists(path):
+                safetensors_path = path
+                break
+
+    print(f"Loading model from {safetensors_path}")
+
+    if not os.path.exists(safetensors_path):
+        print(f"No safetensors file found at {safetensors_path}")
+        return None
+
+    # Load the model using safetensors
+    tensors = {}
+    with safe_open(safetensors_path, framework="pt", device="cpu") as f:
+        for key in f.keys():
+            tensors[key] = f.get_tensor(key)
+
+    # Check if metadata_scale exists and print its value
+    if "metadata_scale" in tensors:
+        metadata_scale = tensors["metadata_scale"].item()
+        print(f"Metadata scale: {metadata_scale}")
+    else:
+        print("metadata_scale not found in state dict")
+        # Try looking for it with model prefix
+        for key in tensors:
+            if key.endswith("metadata_scale"):
+                metadata_scale = tensors[key].item()
+                print(f"Found metadata scale as {key}: {metadata_scale}")
+
+    if "attention_scale" in tensors:
+        attention_scale = tensors["attention_scale"].item()
+        print(f"Attention scale: {attention_scale}")
+    else:
+        # Try looking for it with model prefix
+        for key in tensors:
+            if key.endswith("attention_scale"):
+                attention_scale = tensors[key].item()
+                print(f"Found attention scale as {key}: {attention_scale}")
+
+    # Find embedding keys
+    j_embedding_key = None
+    i_embedding_key = None
+    for key in tensors:
+        if "jurisdiction_embeddings.weight" in key:
+            j_embedding_key = key
+        if "insurance_type_embeddings.weight" in key:
+            i_embedding_key = key
+
+    # Check embedding distances
+    if j_embedding_key and i_embedding_key:
+        j_embeddings = tensors[j_embedding_key].numpy()
+        i_embeddings = tensors[i_embedding_key].numpy()
+
+        print(f"Jurisdiction embedding shape: {j_embeddings.shape}")
+        print(f"Insurance type embedding shape: {i_embeddings.shape}")
+
+        # Calculate distances between embeddings
+        if j_embeddings.shape[0] >= 2:
+            j_distance = np.linalg.norm(j_embeddings[0] - j_embeddings[1])
+            print(f"Distance between jurisdiction embeddings (0 vs 1): {j_distance}")
+
+        if i_embeddings.shape[0] >= 2:
+            i_distance = np.linalg.norm(i_embeddings[0] - i_embeddings[1])
+            print(f"Distance between insurance type embeddings (0 vs 1): {i_distance}")
+    else:
+        print("Embedding weights not found in tensors")
+        print("Available keys:", list(tensors.keys()))
+
+    return {
+        "metadata_scale": metadata_scale if "metadata_scale" in tensors else None,
+        "j_embeddings": j_embeddings if j_embedding_key else None,
+        "i_embeddings": i_embeddings if i_embedding_key else None,
+    }
 
 
 def compute_metrics(predictions: np.ndarray, labels: np.ndarray) -> dict:
@@ -131,6 +221,34 @@ class ClassificationPipeline(TextClassificationPipeline):
         return out_logits
 
 
+# Check if the model has a custom forward method that supports metadata
+def is_metadata_model(model):
+    """Check if model has metadata capabilities by inspecting its methods"""
+    # Look for the key attributes in our custom model
+    has_j_embeddings = hasattr(model, "jurisdiction_embeddings")
+    has_i_embeddings = hasattr(model, "insurance_type_embeddings")
+
+    # Check if model's forward method signature includes the metadata params
+    forward_sig = model.forward.__code__.co_varnames
+    accepts_metadata = "jurisdiction_id" in forward_sig and "insurance_type_id" in forward_sig
+
+    return has_j_embeddings and has_i_embeddings and accepts_metadata
+
+
+def count_parameters(model):
+    """Count the number of trainable parameters in the model and calculate size in MB"""
+    param_count = 0
+    size_in_bytes = 0
+
+    for p in model.parameters():
+        if p.requires_grad:
+            param_count += p.numel()
+            size_in_bytes += p.numel() * p.element_size()
+
+    size_in_mb = size_in_bytes / (1024 * 1024)
+    return param_count, size_in_mb
+
+
 def main(config_path: str):
     cfg = load_config(config_path)
 
@@ -147,39 +265,142 @@ def main(config_path: str):
     # Load raw dataset
     test_dataset = get_records_list(dataset_path)
 
-    # tokenizer = AutoTokenizer.from_pretrained(pretrained_model_key, model_max_length=512)
-    checkpoints_dir = os.path.join(MODEL_DIR, "train_backgrounds_suff", base_model_name)
+    # Set up paths
+    checkpoints_dir = os.path.join(MODEL_DIR, "train_backgrounds_suff_augmented", base_model_name)
     print("Evaluating from checkpoint: ", checkpoint_name)
     ckpt_path = os.path.join(checkpoints_dir, checkpoint_name)
 
+    _results = inspect_model_metadata(ckpt_path)
+
+    # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
-    model = AutoModelForSequenceClassification.from_pretrained(
-        ckpt_path, num_labels=3, id2label=ID2LABEL, label2id=LABEL2ID
+
+    model = create_metadata_model(
+        pretrained_model_key=ckpt_path,
+        base_model_name=base_model_name,
+        num_labels=3,
+        id2label=ID2LABEL,
+        label2id=LABEL2ID,
     )
 
-    # Isolate records
+    # Count model parameters
+    param_count, size_in_mb = count_parameters(model)
+    print(f"Model size: {param_count:,} parameters ({size_in_mb:.2f} MB)")
+
+    # Check if model supports metadata
+    supports_metadata = is_metadata_model(model)
+
+    # Prepare data
     text_records = [rec["text"] for rec in test_dataset]
     labels = [construct_label(rec["decision"], rec["sufficiency_id"], LABEL2ID) for rec in test_dataset]
 
-    device = "cuda"
-    # pipeline = ClassificationPipeline(model=model, tokenizer=tokenizer, device=device)
-    pipeline = ClassificationPipeline(model=model, tokenizer=tokenizer, device=device, truncation=True)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
 
-    predictions = torch.cat(pipeline(text_records, batch_size=100))
+    # For models with metadata support, use a custom approach
+    if supports_metadata:
+        # Extract metadata
+        jurisdictions = [rec.get("jurisdiction", "Unspecified") for rec in test_dataset]
+        insurance_types = [rec.get("insurance_type", "Unspecified") for rec in test_dataset]
 
+        # Convert metadata to tensors
+        j_ids = torch.tensor([JURISDICTION_MAP.get(j, JURISDICTION_MAP["Unspecified"]) for j in jurisdictions])
+        i_ids = torch.tensor([INSURANCE_TYPE_MAP.get(i, INSURANCE_TYPE_MAP["Unspecified"]) for i in insurance_types])
+
+        model.to(device)
+        model.eval()
+
+        # Process in batches
+        batch_size = 100
+        all_logits = []
+
+        for i in range(0, len(text_records), batch_size):
+            end_idx = min(i + batch_size, len(text_records))
+            batch_texts = text_records[i:end_idx]
+            batch_j_ids = j_ids[i:end_idx].to(device)
+            batch_i_ids = i_ids[i:end_idx].to(device)
+
+            inputs = tokenizer(batch_texts, truncation=True, padding=True, return_tensors="pt").to(device)
+
+            with torch.no_grad():
+                outputs = model(**inputs, jurisdiction_id=batch_j_ids, insurance_type_id=batch_i_ids)
+
+            all_logits.append(outputs["logits"].cpu())
+
+        predictions = torch.cat(all_logits)
+
+        # Now create predictions with unspecified metadata for all examples
+        print("Computing metrics with unspecified metadata for all examples...")
+        unspecified_j_ids = torch.full((len(text_records),), JURISDICTION_MAP["Unspecified"], dtype=torch.long)
+        unspecified_i_ids = torch.full((len(text_records),), INSURANCE_TYPE_MAP["Unspecified"], dtype=torch.long)
+
+        all_unspecified_logits = []
+
+        for i in range(0, len(text_records), batch_size):
+            end_idx = min(i + batch_size, len(text_records))
+            batch_texts = text_records[i:end_idx]
+            batch_j_ids = unspecified_j_ids[i:end_idx].to(device)
+            batch_i_ids = unspecified_i_ids[i:end_idx].to(device)
+
+            inputs = tokenizer(batch_texts, truncation=True, padding=True, return_tensors="pt").to(device)
+
+            with torch.no_grad():
+                outputs = model(**inputs, jurisdiction_id=batch_j_ids, insurance_type_id=batch_i_ids)
+
+            all_unspecified_logits.append(outputs["logits"].cpu())
+
+        unspecified_predictions = torch.cat(all_unspecified_logits)
+    else:
+        # For standard models, use the original pipeline
+        pipeline = ClassificationPipeline(model=model, tokenizer=tokenizer, device=device, truncation=True)
+        predictions = torch.cat(pipeline(text_records, batch_size=100))
+        # No metadata to ignore for standard models, so unspecified predictions are the same
+        unspecified_predictions = predictions
+
+    # Compute standard metrics
+    metrics = compute_metrics(predictions, labels)
+    metrics["param_count"] = param_count
+    metrics["model_size_mb"] = size_in_mb
+
+    # Add model size to metrics
+    metrics["param_count"] = param_count
+
+    # Compute metrics with unspecified metadata
+    unspecified_metrics = compute_metrics(unspecified_predictions, labels)
+    # Add model size to unspecified metrics
+    unspecified_metrics["param_count"] = param_count
+
+    # Compute threshold metrics if specified
     if threshold is not None:
         threshold_metrics = compute_metrics_w_threshold(predictions, labels, threshold)
+        threshold_metrics["param_count"] = param_count
+        threshold_metrics["model_size_mb"] = size_in_mb
 
-    metrics = compute_metrics(predictions, labels)
+        unspecified_threshold_metrics = compute_metrics_w_threshold(unspecified_predictions, labels, threshold)
+        unspecified_threshold_metrics["param_count"] = param_count
+        unspecified_threshold_metrics["model_size_mb"] = size_in_mb
 
     # Print and write metrics
+    print("Standard metrics:")
     print(metrics)
     with open(os.path.join(ckpt_path, "test_metrics.json"), "w") as f:
         json.dump(metrics, f)
+
+    print("\nMetrics with unspecified metadata:")
+    print(unspecified_metrics)
+    with open(os.path.join(ckpt_path, "test_metrics_unspecified.json"), "w") as f:
+        json.dump(unspecified_metrics, f)
+
     if threshold is not None:
+        print("\nStandard threshold metrics:")
         print(threshold_metrics)
         with open(os.path.join(ckpt_path, "test_metrics_w_threshold.json"), "w") as f:
             json.dump(threshold_metrics, f)
+
+        print("\nThreshold metrics with unspecified metadata:")
+        print(unspecified_threshold_metrics)
+        with open(os.path.join(ckpt_path, "test_metrics_w_threshold_unspecified.json"), "w") as f:
+            json.dump(unspecified_threshold_metrics, f)
 
     return None
 

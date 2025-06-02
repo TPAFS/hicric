@@ -6,6 +6,7 @@ data/paper
 data
 models
 wandb
+wandb_logs
 
 __pycache__/
 *.pyc

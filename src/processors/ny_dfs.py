@@ -37,6 +37,15 @@ def process(source_lineitem: dict, output_dirname: str) -> dict:
         axis=1,
     ).to_list()
 
+    coverage_type_map = {
+        "HMO": "Commercial",
+        "PPO": "Commercial",
+        "EPO": "Commercial",
+        "Self-Funded": "Commercial",
+        "Medicaid": "Medicaid",
+        "Managed Long Term Care": "Medicaid",
+    }
+
     # Construct a record for each case summary
     # (some raw case adjudications include multiple summaries from different reviewers)
     for tuple in df_tuples:
@@ -49,6 +58,8 @@ def process(source_lineitem: dict, output_dirname: str) -> dict:
                 "appeal_type": tuple[3],
                 "diagnosis": tuple[4],
                 "treatment": tuple[5],
+                "jurisdiction": "NY",
+                "insurance_type": coverage_type_map.get(tuple[2], "Unspecified"),
             }
             add_jsonl_line(outfile, line_data)
 

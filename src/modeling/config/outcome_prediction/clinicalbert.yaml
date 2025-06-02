@@ -8,17 +8,17 @@ hicric_pretrained: False
 base_model_name: "clinicalbert"
 pretrained_model_dir: "None"
 pretrained_hf_model_key: "medicalai/ClinicalBERT"
-train_data_path: "./data/outcomes/train_backgrounds_suff.jsonl"
+train_data_path: "./data/outcomes/train_backgrounds_suff_augmented.jsonl"
 
 # Training settings
 learning_rate: 8.0e-7
 weight_decay: 0.01
 num_epochs: 40
-batch_size: 20
+batch_size: 32
 dtype: "float16"  # 'float32','float16' for training dtype
 compile: True # Whether to use torch compile
 
 # Test eval settings
 test_data_path: "./data/outcomes/test_backgrounds_suff.jsonl"
-checkpoint_name: "checkpoint-46134"
-eval_threshold: .55
+checkpoint_name: checkpoint-36288
+eval_threshold: .65
